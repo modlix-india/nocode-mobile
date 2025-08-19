@@ -17,38 +17,29 @@ It is two parts.
         - --password=&lt;password&gt;
         - --conffile=&lt;filepath&gt;
             - if a conf file is provided in the format of properties file that is considered to load all the arguments.
-    1. The list of urls that are required for the 
-    1. The list of configuratble options in application properties for building the applications.
+    1. JSON representation of the Mobile APP service.
     ```json
         {
-            "name": "appbuilder",
-            ...
-            ...
-            "properties": {
-                "defaultPage": "home",
-                ...
-                ...
-                "mobileApps": {
-                    "<UUIDKey1>": {
-                        "key": "<UUIDKey1>",
-                        "name": "<name>",
-                        "description": "<description>",
-                        "startURL": "", //URL of the application to start. Not provided the default page will be loaded under the client's context.
-                        "ios": false, //Default is false. If true generates the ios file.
-                        "android": false, // Default is false. If true generates the android file.
-                        "icon": "", // URL for the 
-                        // when no splash screen is required then the following section is not required.
-                        "splashScreen": {
-                            "image": "", // URL for the image, recommended resolution is 1024x1024 png.
-                            "color": "", // HEX code for the color
-                            "backgroundImage": "", // URL of the Image for the background like a full wall paper
-                            "fullScreen": false, // Default is false
-                            "gravity": "center", // Default is center. "center", "fill", "fitCenter", "centerCrop"
-                            "color_dark": "", // Color in darkmode
-                            "background_image_dark": "", // URL of the Image for the background in dark mode
-                            "image_dark": "" // URL of the Image in dark mode.
-                        }
-                    }
+            "id" : "<generated>"
+            "appCode": "<AppCode>",
+            "clientCode": "<ClientCode>",
+            "details": {
+                "name": "<name>",
+                "description": "<description>",
+                "startURL": "", //URL of the application to start. Not provided the default page will be loaded under the client's context.
+                "ios": false, //Default is false. If true generates the ios file.
+                "android": false, // Default is false. If true generates the android file.
+                "icon": "", // URL for the 
+                // when no splash screen is required then the following section is not required.
+                "splashScreen": {
+                    "image": "", // URL for the image, recommended resolution is 1024x1024 png.
+                    "color": "", // HEX code for the color
+                    "backgroundImage": "", // URL of the Image for the background like a full wall paper
+                    "fullScreen": false, // Default is false
+                    "gravity": "center", // Default is center. "center", "fill", "fitCenter", "centerCrop"
+                    "color_dark": "", // Color in darkmode
+                    "background_image_dark": "", // URL of the Image for the background in dark mode
+                    "image_dark": "" // URL of the Image in dark mode.
                 }
             }
         }
