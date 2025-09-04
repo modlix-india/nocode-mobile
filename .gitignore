@@ -1,3 +1,6 @@
 build/**
 scripts/nocode-mobile-venv/**
 scripts/app_*
+scripts/run_dev.sh
+scripts/run_prod.sh
+scripts/run_stage.sh
