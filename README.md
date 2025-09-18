@@ -36,7 +36,7 @@ It is two parts.
                     "color": "", // HEX code for the color
                     "backgroundImage": "", // URL of the Image for the background like a full wall paper
                     "fullScreen": false, // Default is false
-                    "gravity": "center", // Default is center. "center", "fill", "fitCenter", "centerCrop"
+                    // "gravity": "center", // Default is center. "center", "fill", "fitCenter", "centerCrop"
                     "color_dark": "", // Color in darkmode
                     "background_image_dark": "", // URL of the Image for the background in dark mode
                     "image_dark": "" // URL of the Image in dark mode.

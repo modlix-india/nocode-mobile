@@ -157,6 +157,69 @@ try :
         f.write(f"  static const String homePageTitle = '{details['name']}';\n")
         f.write(f"  static const String appVersion = '{details['version']}.0.0';\n")
         f.write(f"  static const String startURL = '{details['startURL']}';\n")
+
+        if 'splashScreen' in details:
+            if 'image' in details['splashScreen']:
+                extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['image']}", f'./{uuid}/assets/splash_screen')
+                details['splashScreen']['image'] = f"assets/splash_screen.{extension}"
+                f.write(f"  static const String splashScreenImage = 'assets/splash_screen.{extension}';\n")
+            else:
+                f.write(f"  static const String splashScreenImage = '';\n")
+
+            if 'backgroundImage' in details['splashScreen']:
+                extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['backgroundImage']}", f'./{uuid}/assets/splash_screen_background')
+                details['splashScreen']['backgroundImage'] = f"assets/splash_screen_background.{extension}"
+                f.write(f"  static const String splashScreenBackgroundImage = 'assets/splash_screen_background.{extension}';\n")
+            else:
+                f.write(f"  static const String splashScreenBackgroundImage = '';\n")
+
+            if 'image_dark' in details['splashScreen']:
+                extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['image_dark']}", f'./{uuid}/assets/splash_screen_dark')
+                details['splashScreen']['image_dark'] = f"assets/splash_screen_dark.{extension}"
+                f.write(f"  static const String splashScreenImageDark = 'assets/splash_screen_dark.{extension}';\n")
+            else:
+                f.write(f"  static const String splashScreenImageDark = '';\n")
+
+            if 'background_image_dark' in details['splashScreen']:
+                extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['background_image_dark']}", f'./{uuid}/assets/splash_screen_background_dark')
+                details['splashScreen']['background_image_dark'] = f"assets/splash_screen_background_dark.{extension}"
+                f.write(f"  static const String splashScreenBackgroundImageDark = 'assets/splash_screen_background_dark.{extension}';\n")
+            else:
+                f.write(f"  static const String splashScreenBackgroundImageDark = '';\n")
+
+            if 'color' in details['splashScreen']:
+                f.write(f"  static const String splashScreenColor = '{details['splashScreen']['color']}';\n")
+            else:
+                f.write(f"  static const String splashScreenColor = '#FFFFFF';\n")
+
+            if 'color_dark' in details['splashScreen']:
+                f.write(f"  static const String splashScreenColorDark = '{details['splashScreen']['color_dark']}';\n")
+            else:
+                f.write(f"  static const String splashScreenColorDark = '';\n")
+
+            if 'fullScreen' in details['splashScreen']:
+                value = "true" if details['splashScreen']['fullScreen'] else "false"
+                f.write(f"  static const bool splashScreenFullScreen = {value};\n")
+            else:
+                f.write(f"  static const bool splashScreenFullScreen = false;\n")
+
+            if 'gravity' in details['splashScreen']:
+                f.write(f"  static const String splashScreenGravity = '{details['splashScreen']['gravity']}';\n")
+            else:
+                f.write(f"  static const String splashScreenGravity = 'center';\n")
+
+            f.write(f"  static const bool generatedSplashScreen = true;\n")
+        else:
+            f.write(f"  static const String splashScreenImage = '';\n")
+            f.write(f"  static const String splashScreenBackgroundImage = '';\n")
+            f.write(f"  static const String splashScreenImageDark = '';\n")
+            f.write(f"  static const String splashScreenBackgroundImageDark = '';\n")
+            f.write(f"  static const String splashScreenColor = '#FFFFFF';\n")
+            f.write(f"  static const String splashScreenColorDark = '#FFFFFF';\n")
+            f.write(f"  static const bool splashScreenFullScreen = false;\n")
+            f.write(f"  static const String splashScreenGravity = 'center';\n")
+            f.write(f"  static const bool generatedSplashScreen = false;\n")
+                
         f.write(f"}}\n")
 
     logger.info(f"App properties file created: {app_properties_file}")
@@ -164,22 +227,14 @@ try :
     if details['icon']:
         # Download the icon
         icon_url = f"{url_prefix}/{details['icon']}"
-        extension = download_file_withextension(icon_url, f'./{uuid}/assets/icon')
-        details['icon'] = f"assets/icon.{extension}"
-
-    if 'splashScreen' in details:
-        if 'image' in details['splashScreen']:
-            extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['image']}", f'./{uuid}/assets/splash_screen')
-            details['splashScreen']['image'] = f"assets/splash_screen.{extension}"
-        if 'backgroundImage' in details['splashScreen']:
-            extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['backgroundImage']}", f'./{uuid}/assets/splash_screen_background')
-            details['splashScreen']['backgroundImage'] = f"assets/splash_screen_background.{extension}"
-        if 'image_dark' in details['splashScreen']:
-            extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['image_dark']}", f'./{uuid}/assets/splash_screen_dark')
-            details['splashScreen']['image_dark'] = f"assets/splash_screen_dark.{extension}"
-        if 'background_image_dark' in details['splashScreen']:
-            extension = download_file_withextension(f"{url_prefix}/{details['splashScreen']['background_image_dark']}", f'./{uuid}/assets/splash_screen_background_dark')
-            details['splashScreen']['background_image_dark'] = f"assets/splash_screen_background_dark.{extension}"
+        logger.info(f"Downloading icon from: {icon_url}")
+        try:
+            extension = download_file_withextension(icon_url, f'./{uuid}/assets/icon')
+            details['icon'] = f"assets/icon.{extension}"
+            logger.info(f"Icon downloaded successfully: {details['icon']}")
+        except Exception as e:
+            logger.error(f"Failed to download icon: {e}")
+            details['icon'] = None
 
     logger.info(f"After all the downloads, the mobileApp is: {details}")
 
@@ -242,11 +297,11 @@ try :
 
         if 'icon' in details:
             f.write(f"flutter_icons:\n")
+            f.write(f"  image_path: {details['icon']}\n")
             if 'android' in details and details['android']:
                 f.write(f"  android: true\n")
             if 'ios' in details and details['ios']:
                 f.write(f"  ios: true\n")
-            f.write(f"  image_path: {details['icon']}\n")
 
     logger.info(f"Pubspec.yaml file updated: {f'./{uuid}/pubspec.yaml'}")
 
@@ -282,9 +337,27 @@ try :
     with open(ios_info_plist, 'w') as f:
         f.write(content)
 
-    os.system(f"cd {uuid} && keytool -genkey -v -keystore android/app/keystore/release.keystore -alias modlix -keyalg RSA -keysize 2048 -validity 10000 -storepass modlix_778_231 -keypass modlix_778_231 -dname \"CN=Modlix Team, OU=Mobile Development, O=Modlix, L=Karnataka, ST=Karnataka, C=IN\" -noprompt")
 
-    os.system(f"cd {uuid} && flutter pub get && dart run flutter_native_splash:create && dart run flutter_launcher_icons && dart pub add rename --dev && dart run rename setAppName --value \"{details['name']}\"")
+    if 'androidKeystore' in mobileApp:
+        os.system(f"cd {uuid} && echo '{mobileApp['androidKeystore']}' | base64 -d > android/app/keystore/release.keystore")
+        with open(f"./{uuid}/android/key.properties", 'w') as f:
+            f.write(f"keyAlias={mobileApp['androidAlias']}\n")
+            f.write(f"keyPassword={mobileApp['androidKeyPass']}\n")
+            f.write(f"storePassword={mobileApp['androidStorePass']}\n")
+
+    logger.info("Running flutter pub get...")
+    os.system(f"cd {uuid} && flutter pub get")
+    
+    if details.get('icon'):
+        logger.info("Generating app icons...")
+        result = os.system(f"cd {uuid} && dart run flutter_launcher_icons --file pubspec.yaml")
+        if result != 0:
+            logger.error("Failed to generate app icons")
+        else:
+            logger.info("App icons generated successfully")
+    
+    logger.info("Adding rename package and setting app name...")
+    os.system(f"cd {uuid} && dart run flutter_native_splash:create && dart pub add rename --dev && dart run rename setAppName --value \"{details['name']}\"")
 
     if 'android' in details and details['android']:
         os.system(f"cd {uuid} && flutter build appbundle --release")
