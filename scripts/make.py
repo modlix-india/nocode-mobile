@@ -289,7 +289,7 @@ try :
                 if ios_content_mode:
                     f.write(f"  ios_content_mode: {ios_content_mode}\n")
 
-        f.write(f"version: {details['version']}.0.0+1\n")
+        f.write(f"version: {details['version']}.0.0+{details['version']}\n")
         lowercasename = details['name'].lower().replace(' ', '_')
         f.write(f"name: {lowercasename}\n")
         if 'description' in details:
