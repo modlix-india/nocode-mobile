@@ -1,12 +1,15 @@
 import argparse
 import base64
 import configparser
-import uuid
+import uuid as uuid_module
 import requests
 import shutil
 import logging
 import os
 import traceback
+import subprocess
+import re
+import plistlib
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +41,10 @@ def read_cli_arguments():
     parser.add_argument('--conffile',
                        help='Path to configuration file in properties format.')
     
+    parser.add_argument('--keep-build',
+                       action='store_true',
+                       help='Keep the build folder after completion (useful for debugging)')
+    
     args = parser.parse_args()
     
     # If conffile is provided, read properties from it
@@ -65,7 +72,7 @@ def read_cli_arguments():
 def shortuuid():
     base = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
     baseDivisor = int(len(base))
-    hex = str(uuid.uuid4()).replace('-', '')
+    hex = str(uuid_module.uuid4()).replace('-', '')
     
     num = int('0x' + hex, 16)
     a = []
@@ -86,6 +93,295 @@ def download_file_withextension(url, path):
         return extension
     else:
         raise Exception(f"Failed to download file: {url} with status code: {response.status_code}")
+
+
+# ===================== iOS Build Helper Functions =====================
+
+def create_temporary_keychain(keychain_name, keychain_password):
+    """Create a temporary keychain for iOS code signing."""
+    keychain_path = f"{os.path.expanduser('~')}/Library/Keychains/{keychain_name}"
+    
+    # Delete existing keychain if present
+    subprocess.run(['security', 'delete-keychain', keychain_path], capture_output=True)
+    
+    # Create new keychain
+    result = subprocess.run(
+        ['security', 'create-keychain', '-p', keychain_password, keychain_path],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise Exception(f"Failed to create keychain: {result.stderr}")
+    
+    # Set keychain settings
+    subprocess.run(['security', 'set-keychain-settings', '-lut', '21600', keychain_path])
+    
+    # Unlock keychain
+    subprocess.run(['security', 'unlock-keychain', '-p', keychain_password, keychain_path])
+    
+    # Add to search list
+    result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
+    keychains = result.stdout.strip().replace('"', '').split('\n')
+    keychains = [k.strip() for k in keychains if k.strip()]
+    keychains.insert(0, keychain_path)
+    subprocess.run(['security', 'list-keychains', '-d', 'user', '-s'] + keychains)
+    
+    logger.info(f"Created temporary keychain: {keychain_path}")
+    return keychain_path
+
+
+def import_certificate_to_keychain(keychain_path, cert_path, cert_password, keychain_password):
+    """Import a .p12 certificate into the keychain."""
+    result = subprocess.run([
+        'security', 'import', cert_path,
+        '-k', keychain_path,
+        '-P', cert_password,
+        '-T', '/usr/bin/codesign',
+        '-T', '/usr/bin/security'
+    ], capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise Exception(f"Failed to import certificate: {result.stderr}")
+    
+    # Set key partition list to allow codesign access
+    subprocess.run([
+        'security', 'set-key-partition-list',
+        '-S', 'apple-tool:,apple:',
+        '-s', '-k', keychain_password, keychain_path
+    ], capture_output=True)
+    
+    logger.info("Certificate imported successfully")
+
+
+def install_provisioning_profile(profile_path):
+    """Install a provisioning profile."""
+    profiles_dir = os.path.expanduser('~/Library/MobileDevice/Provisioning Profiles')
+    os.makedirs(profiles_dir, exist_ok=True)
+    
+    # Read the profile to get its UUID
+    with open(profile_path, 'rb') as f:
+        content = f.read()
+    
+    # Extract UUID from the profile using plistlib
+    # The profile is a signed plist, so we need to extract the plist portion
+    start = content.find(b'<?xml')
+    end = content.find(b'</plist>') + len(b'</plist>')
+    if start != -1 and end != -1:
+        plist_data = content[start:end]
+        profile_info = plistlib.loads(plist_data)
+        profile_uuid = profile_info.get('UUID', str(uuid_module.uuid4()))
+        profile_name = profile_info.get('Name', 'Unknown')
+    else:
+        profile_uuid = str(uuid_module.uuid4())
+        profile_name = 'Unknown'
+    
+    dest_path = os.path.join(profiles_dir, f"{profile_uuid}.mobileprovision")
+    shutil.copy2(profile_path, dest_path)
+    
+    logger.info(f"Installed provisioning profile: {profile_name} ({profile_uuid})")
+    return profile_uuid, profile_name
+
+
+def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name):
+    """Update Xcode project with manual signing configuration.
+    
+    Sets bundle ID, team ID, and manual signing settings in Runner.xcodeproj only.
+    This does NOT affect Pods.xcodeproj.
+    """
+    pbxproj_path = os.path.join(project_dir, 'ios', 'Runner.xcodeproj', 'project.pbxproj')
+    
+    with open(pbxproj_path, 'r') as f:
+        content = f.read()
+    
+    logger.info(f"Updating Xcode project: bundle_id={bundle_id}, team_id={team_id}, profile={profile_name}")
+    
+    # Update bundle identifier everywhere it appears
+    content = re.sub(
+        r'PRODUCT_BUNDLE_IDENTIFIER = [^;]+;',
+        f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_id};',
+        content
+    )
+    
+    # Update CODE_SIGN_IDENTITY to Apple Distribution (for release builds)
+    content = re.sub(
+        r'"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "[^"]*";',
+        '"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";',
+        content
+    )
+    
+    # The signing settings need to be added to the Runner target's Release build configuration
+    # The Release config for Runner target is 97C147071CF9000F007C117D
+    # We need to add these settings to its buildSettings block
+    
+    # Find the Runner target's Release configuration and add signing settings
+    # Pattern to find the Release config buildSettings block
+    release_config_pattern = r'(97C147071CF9000F007C117D /\* Release \*/ = \{\s*isa = XCBuildConfiguration;\s*baseConfigurationReference = [^;]+;\s*buildSettings = \{)'
+    
+    signing_settings = f'''
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
+				CODE_SIGN_STYLE = Manual;
+				DEVELOPMENT_TEAM = {team_id};
+				PROVISIONING_PROFILE_SPECIFIER = "{profile_name}";'''
+    
+    # Check if CODE_SIGN_STYLE already exists in the Release config
+    if 'CODE_SIGN_STYLE = Manual' not in content:
+        # Add signing settings after the buildSettings = { line
+        content = re.sub(
+            release_config_pattern,
+            r'\g<1>' + signing_settings,
+            content
+        )
+    
+    # Also update the Debug configuration for consistency (97C147061CF9000F007C117D)
+    debug_config_pattern = r'(97C147061CF9000F007C117D /\* Debug \*/ = \{\s*isa = XCBuildConfiguration;\s*baseConfigurationReference = [^;]+;\s*buildSettings = \{)'
+    
+    if 'CODE_SIGN_STYLE = Manual' not in content or content.count('CODE_SIGN_STYLE = Manual') < 2:
+        content = re.sub(
+            debug_config_pattern,
+            r'\g<1>' + signing_settings,
+            content
+        )
+    
+    # Update TargetAttributes to set ProvisioningStyle = Manual
+    runner_target_id = '97C146ED1CF9000F007C117D'
+    
+    # Replace or add ProvisioningStyle in TargetAttributes
+    if 'ProvisioningStyle' in content:
+        content = re.sub(
+            r'ProvisioningStyle = [^;]+;',
+            'ProvisioningStyle = Manual;',
+            content
+        )
+    
+    # Add DevelopmentTeam and ProvisioningStyle to the Runner target in TargetAttributes if not present
+    if f'{runner_target_id} = {{' in content and 'ProvisioningStyle = Manual' not in content:
+        # Find the Runner target block in TargetAttributes and add the settings
+        target_block_pattern = rf'({runner_target_id} = \{{\s*\n\s+CreatedOnToolsVersion = [^;]+;\s*\n)(\s+LastSwiftMigration = [^;]+;\s*\n\s+\}};)'
+        replacement = rf'\g<1>\t\t\t\t\tDevelopmentTeam = {team_id};\n\g<2>'
+        content = re.sub(target_block_pattern, replacement, content)
+        
+        # Add ProvisioningStyle
+        target_block_pattern2 = rf'({runner_target_id} = \{{\s*\n\s+CreatedOnToolsVersion = [^;]+;\s*\n\s+DevelopmentTeam = [^;]+;\s*\n\s+LastSwiftMigration = [^;]+;\s*\n)(\s+\}};)'
+        replacement2 = rf'\g<1>\t\t\t\t\tProvisioningStyle = Manual;\n\t\t\t\t\g<2>'
+        content = re.sub(target_block_pattern2, replacement2, content)
+    
+    with open(pbxproj_path, 'w') as f:
+        f.write(content)
+    
+    # Verify the changes were made
+    with open(pbxproj_path, 'r') as f:
+        verify_content = f.read()
+    
+    has_manual_style = 'ProvisioningStyle = Manual' in verify_content
+    has_code_sign_manual = 'CODE_SIGN_STYLE = Manual' in verify_content
+    has_profile_specifier = f'PROVISIONING_PROFILE_SPECIFIER = "{profile_name}"' in verify_content
+    
+    logger.info(f"Verification - ProvisioningStyle=Manual: {has_manual_style}")
+    logger.info(f"Verification - CODE_SIGN_STYLE=Manual: {has_code_sign_manual}")
+    logger.info(f"Verification - PROVISIONING_PROFILE_SPECIFIER set: {has_profile_specifier}")
+    
+    if not has_code_sign_manual or not has_profile_specifier:
+        logger.warning("Some signing settings may not have been applied correctly!")
+    
+    logger.info(f"Updated Xcode project with manual signing: bundle_id={bundle_id}, team_id={team_id}, profile={profile_name}")
+
+
+def create_export_options_plist(output_path, team_id, bundle_id, profile_name, method='app-store'):
+    """Create ExportOptions.plist for iOS archive export."""
+    export_options = {
+        'method': method,
+        'teamID': team_id,
+        'signingStyle': 'manual',
+        'provisioningProfiles': {
+            bundle_id: profile_name
+        },
+        'uploadSymbols': True,
+        'compileBitcode': False
+    }
+    
+    with open(output_path, 'wb') as f:
+        plistlib.dump(export_options, f)
+    
+    logger.info(f"Created ExportOptions.plist at {output_path}")
+
+
+def cleanup_keychain(keychain_path):
+    """Delete the temporary keychain."""
+    try:
+        subprocess.run(['security', 'delete-keychain', keychain_path], capture_output=True)
+        logger.info(f"Deleted temporary keychain: {keychain_path}")
+    except Exception as e:
+        logger.warning(f"Failed to delete keychain: {e}")
+
+
+def get_ios_credentials(mobileApp):
+    """Get iOS credentials from API response or environment variables."""
+    details = mobileApp.get('details', {})
+    ios_publish_mode = details.get('iosPublishMode', 'TENANT_ACCOUNT')
+    
+    if ios_publish_mode == 'PLATFORM_ACCOUNT':
+        # Use environment variables for Modlix's account
+        cert_path = os.environ.get('MODLIX_IOS_CERTIFICATE')
+        cert_password = os.environ.get('MODLIX_IOS_CERT_PASSWORD')
+        team_id = mobileApp.get('iosTeamId') or os.environ.get('MODLIX_IOS_TEAM_ID')
+        
+        if not all([cert_path, cert_password, team_id]):
+            raise Exception("PLATFORM_ACCOUNT mode requires MODLIX_IOS_CERTIFICATE, MODLIX_IOS_CERT_PASSWORD, and team ID")
+        
+        # Bundle ID should be provided by the backend
+        bundle_id = mobileApp.get('iosBundleId')
+        if not bundle_id:
+            raise Exception("iosBundleId not provided for PLATFORM_ACCOUNT mode")
+        
+        # Check if provisioning profile is provided by the backend API (auto-generated)
+        profile_base64 = mobileApp.get('iosProvisioningProfile')
+        profile_path = None
+        
+        if not profile_base64:
+            # Fallback to file-based provisioning profile
+            profile_dir = os.environ.get('MODLIX_IOS_PROFILE_DIR')
+            if profile_dir:
+                profile_path = os.path.join(profile_dir, f"{bundle_id}.mobileprovision")
+                if not os.path.exists(profile_path):
+                    raise Exception(f"Provisioning profile not found: {profile_path}. Either configure the backend to auto-generate profiles or manually add the profile file.")
+            else:
+                raise Exception("No provisioning profile available. Configure APPLE_CERTIFICATE_ID in backend for auto-generation, or set MODLIX_IOS_PROFILE_DIR for manual profiles.")
+        else:
+            logger.info("Using auto-generated provisioning profile from backend API")
+        
+        return {
+            'mode': 'PLATFORM_ACCOUNT',
+            'cert_path': cert_path,
+            'cert_password': cert_password,
+            'team_id': team_id,
+            'bundle_id': bundle_id,
+            'profile_path': profile_path,
+            'profile_base64': profile_base64
+        }
+    else:
+        # Use tenant-provided credentials from API response
+        ios_cert = mobileApp.get('iosCertificate')
+        ios_cert_password = mobileApp.get('iosCertificatePassword')
+        ios_profile = mobileApp.get('iosProvisioningProfile')
+        team_id = mobileApp.get('iosTeamId')
+        bundle_id = mobileApp.get('iosBundleId')
+        
+        if not all([ios_cert, ios_cert_password, ios_profile, team_id, bundle_id]):
+            raise Exception("TENANT_ACCOUNT mode requires iosCertificate, iosCertificatePassword, iosProvisioningProfile, iosTeamId, and iosBundleId")
+        
+        return {
+            'mode': 'TENANT_ACCOUNT',
+            'cert_path': None,
+            'cert_password': ios_cert_password,
+            'team_id': team_id,
+            'bundle_id': bundle_id,
+            'profile_path': None,
+            'cert_base64': ios_cert,
+            'profile_base64': ios_profile
+        }
+
+
+# ===================== End iOS Build Helper Functions =====================
 
 args = read_cli_arguments()
 
@@ -126,6 +422,15 @@ if nextAppResponse.status_code != 200:
     exit(1)
 
 mobileApp = nextAppResponse.json()
+
+# Debug: Log iOS-related fields from the API response
+logger.info("=== API Response iOS Fields ===")
+logger.info(f"iosBundleId: {mobileApp.get('iosBundleId')}")
+logger.info(f"iosTeamId: {mobileApp.get('iosTeamId')}")
+logger.info(f"iosProvisioningProfile: {'SET (' + str(len(mobileApp.get('iosProvisioningProfile', '') or '')) + ' chars)' if mobileApp.get('iosProvisioningProfile') else 'NOT SET'}")
+logger.info(f"details.iosPublishMode: {mobileApp.get('details', {}).get('iosPublishMode')}")
+logger.info(f"details.ios: {mobileApp.get('details', {}).get('ios')}")
+logger.info("================================")
 
 if 'exceptionId' in mobileApp or not 'details' in mobileApp:
     logger.error(f"Error: {mobileApp}")
@@ -359,43 +664,232 @@ try :
     logger.info("Adding rename package and setting app name...")
     os.system(f"cd {uuid} && dart run flutter_native_splash:create && dart pub add rename --dev && dart run rename setAppName --value \"{details['name']}\"")
 
+    android_app_url = None
+    ios_app_url = None
+    
+    # ===================== Android Build =====================
     if 'android' in details and details['android']:
+        logger.info("Starting Android build...")
         os.system(f"cd {uuid} && flutter build appbundle --release")
 
-    # Check if the file is built in the output directory {uuid}/build/app/outputs/bundle/release/app-release.aab
-    filePath = f"./{uuid}/build/app/outputs/bundle/release/app-release.aab";
+        # Check if the file is built in the output directory {uuid}/build/app/outputs/bundle/release/app-release.aab
+        filePath = f"./{uuid}/build/app/outputs/bundle/release/app-release.aab"
 
-    if not os.path.exists(filePath):
-        requests.post(f"{url_prefix}/api/ui/applications/mobileApps/status/{mobileApp['id']}", headers=headers, json={"status": "FAILED", "errorMessage": "Android build failed. Please, check with Engineering team."})
-        exit(1)
+        if not os.path.exists(filePath):
+            requests.post(f"{url_prefix}/api/ui/applications/mobileApps/status/{mobileApp['id']}", headers=headers, json={"status": "FAILED", "errorMessage": "Android build failed. Please, check with Engineering team."})
+            exit(1)
 
-    # Rename the file to <appCode>_<clientCode>_<version>.aab
-    newFileName = f"{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.aab"
-    newFilePath = f"./{uuid}/build/app/outputs/bundle/release/{newFileName}"
-    os.rename(filePath, newFilePath)
+        # Rename the file to <appCode>_<clientCode>_<version>.aab
+        newFileName = f"{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.aab"
+        newFilePath = f"./{uuid}/build/app/outputs/bundle/release/{newFileName}"
+        os.rename(filePath, newFilePath)
 
-    # Upload the file to the server, using Multipart/form-data
-    fileUploadURL = f"api/files/secured/_withInClient/"
+        # Upload the file to the server, using Multipart/form-data
+        fileUploadURL = f"api/files/secured/_withInClient/"
 
+        with open(newFilePath, 'rb') as f:
+            response = requests.post(f"{url_prefix}/{fileUploadURL}?clientCode={mobileApp['clientCode']}", headers=headers, files={'file': (newFileName, f, 'application/octet-stream')}, timeout=120)
 
-    with open(newFilePath, 'rb') as f:
-        response = requests.post(f"{url_prefix}/{fileUploadURL}?clientCode={mobileApp['clientCode']}", headers=headers, files={'file': (newFileName, f, 'application/octet-stream')}, timeout=120)
+        if response.status_code != 200:
+            raise Exception(f"Failed to upload Android file to the server. URL: {fileUploadURL}. Status code: {response.status_code}. Response: {response.json()}")
 
-    if response.status_code != 200:
-        raise Exception(f"Failed to upload the file to the server.To the URL: {fileUploadURL}. Status code: {response.status_code}. Response: {response.json()}")
+        logger.info(f"Android file uploaded to the server. URL: {response.json()['url']}")
+        android_app_url = f"api/files/secured/file/{mobileApp['clientCode']}/_withInClient/{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.aab"
 
-    logger.info(f"File uploaded to the server. URL: {response.json()['url']}")
+    # ===================== iOS Build =====================
+    if 'ios' in details and details['ios']:
+        logger.info("Starting iOS build...")
+        keychain_path = None
+        keychain_name = f"build_{uuid}.keychain-db"
+        keychain_password = str(uuid_module.uuid4())
+        
+        try:
+            # Get iOS credentials
+            ios_creds = get_ios_credentials(mobileApp)
+            logger.info(f"iOS build mode: {ios_creds['mode']}")
+            
+            # Create temporary keychain
+            keychain_path = create_temporary_keychain(keychain_name, keychain_password)
+            
+            # Prepare certificate and provisioning profile files
+            if ios_creds['mode'] == 'TENANT_ACCOUNT':
+                # Decode and save certificate from base64
+                cert_temp_path = f"./{uuid}/ios_cert.p12"
+                with open(cert_temp_path, 'wb') as f:
+                    f.write(base64.b64decode(ios_creds['cert_base64']))
+                cert_path = cert_temp_path
+                
+                # Decode and save provisioning profile from base64
+                profile_temp_path = f"./{uuid}/ios_profile.mobileprovision"
+                with open(profile_temp_path, 'wb') as f:
+                    f.write(base64.b64decode(ios_creds['profile_base64']))
+                profile_path = profile_temp_path
+            else:
+                # PLATFORM_ACCOUNT mode - use certificate from environment
+                cert_path = ios_creds['cert_path']
+                
+                # Check if profile is provided via API (auto-generated) or from file
+                if ios_creds['profile_base64']:
+                    # Use auto-generated profile from backend API
+                    profile_temp_path = f"./{uuid}/ios_profile.mobileprovision"
+                    with open(profile_temp_path, 'wb') as f:
+                        f.write(base64.b64decode(ios_creds['profile_base64']))
+                    profile_path = profile_temp_path
+                    logger.info("Using provisioning profile from backend API (auto-generated)")
+                else:
+                    # Use profile from file system
+                    profile_path = ios_creds['profile_path']
+                    logger.info(f"Using provisioning profile from file: {profile_path}")
+            
+            # Import certificate to keychain
+            import_certificate_to_keychain(keychain_path, cert_path, ios_creds['cert_password'], keychain_password)
+            
+            # Install provisioning profile
+            logger.info(f"Installing provisioning profile from: {profile_path}")
+            profile_uuid, profile_name = install_provisioning_profile(profile_path)
+            logger.info(f"Installed profile: UUID={profile_uuid}, Name={profile_name}")
+            
+            # Verify profile is installed
+            profiles_dir = os.path.expanduser('~/Library/MobileDevice/Provisioning Profiles')
+            installed_profile_path = os.path.join(profiles_dir, f"{profile_uuid}.mobileprovision")
+            if os.path.exists(installed_profile_path):
+                logger.info(f"✓ Profile verified at: {installed_profile_path}")
+            else:
+                logger.error(f"✗ Profile NOT found at: {installed_profile_path}")
+            
+            # Update Xcode project signing
+            logger.info("Updating Xcode project signing configuration...")
+            update_xcode_project_signing(f"./{uuid}", ios_creds['bundle_id'], ios_creds['team_id'], profile_name)
+            
+            # Verify the pbxproj was updated
+            pbxproj_path = os.path.join(f"./{uuid}", 'ios', 'Runner.xcodeproj', 'project.pbxproj')
+            with open(pbxproj_path, 'r') as f:
+                pbx_content = f.read()
+            logger.info(f"Verification - Bundle ID in pbxproj: {ios_creds['bundle_id'] in pbx_content}")
+            logger.info(f"Verification - Team ID in pbxproj: {ios_creds['team_id'] in pbx_content}")
+            
+            # Create ExportOptions.plist
+            export_options_path = f"./{uuid}/ExportOptions.plist"
+            create_export_options_plist(export_options_path, ios_creds['team_id'], ios_creds['bundle_id'], profile_name)
+            
+            # Log ExportOptions.plist content for debugging
+            with open(export_options_path, 'rb') as f:
+                export_options = plistlib.load(f)
+            logger.info(f"ExportOptions.plist: {export_options}")
+            
+            # Run pod install
+            logger.info("Running pod install...")
+            os.system(f"cd {uuid}/ios && pod install")
+            
+            # Build iOS IPA using xcodebuild directly for more control
+            logger.info("Building iOS IPA...")
+            
+            # First, build the app using Flutter to prepare dependencies
+            logger.info("Step 1: Running flutter build ios --release --no-codesign")
+            prep_result = os.system(f"cd {uuid} && flutter build ios --release --no-codesign")
+            if prep_result != 0:
+                raise Exception("Flutter iOS build preparation failed")
+            
+            # Verify the certificate was imported correctly
+            cert_identity_result = subprocess.run(
+                ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+                capture_output=True, text=True
+            )
+            logger.info(f"Available signing identities in keychain:\n{cert_identity_result.stdout}")
+            
+            # Archive using xcodebuild directly
+            archive_path = f"./{uuid}/build/ios/archive/Runner.xcarchive"
+            logger.info("Step 2: Archiving with xcodebuild")
+            
+            # Only pass signing parameters for the Runner target, not globally
+            # The project.pbxproj has been updated with manual signing for Runner
+            archive_cmd = (
+                f"cd {uuid}/ios && xcodebuild archive "
+                f"-workspace Runner.xcworkspace "
+                f"-scheme Runner "
+                f"-configuration Release "
+                f"-archivePath ../build/ios/archive/Runner.xcarchive "
+                f"-destination 'generic/platform=iOS' "
+                f"ONLY_ACTIVE_ARCH=NO"
+            )
+            logger.info(f"Archive command: {archive_cmd}")
+            archive_result = os.system(archive_cmd)
+            if archive_result != 0:
+                raise Exception("xcodebuild archive failed")
+            
+            # Export IPA using xcodebuild
+            ipa_output_dir = f"./{uuid}/build/ios/ipa"
+            os.makedirs(ipa_output_dir, exist_ok=True)
+            logger.info("Step 3: Exporting IPA with xcodebuild")
+            export_cmd = (
+                f"xcodebuild -exportArchive "
+                f"-archivePath {archive_path} "
+                f"-exportPath {ipa_output_dir} "
+                f"-exportOptionsPlist {export_options_path}"
+            )
+            logger.info(f"Export command: {export_cmd}")
+            build_result = os.system(export_cmd)
+            
+            if build_result != 0:
+                raise Exception("iOS build failed")
+            
+            # Find the IPA file
+            ipa_dir = f"./{uuid}/build/ios/ipa"
+            ipa_files = [f for f in os.listdir(ipa_dir) if f.endswith('.ipa')] if os.path.exists(ipa_dir) else []
+            
+            if not ipa_files:
+                raise Exception("IPA file not found after build")
+            
+            ipa_path = os.path.join(ipa_dir, ipa_files[0])
+            
+            # Rename the IPA file
+            new_ipa_name = f"{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.ipa"
+            new_ipa_path = os.path.join(ipa_dir, new_ipa_name)
+            os.rename(ipa_path, new_ipa_path)
+            
+            # Upload the IPA file
+            fileUploadURL = f"api/files/secured/_withInClient/"
+            
+            with open(new_ipa_path, 'rb') as f:
+                response = requests.post(f"{url_prefix}/{fileUploadURL}?clientCode={mobileApp['clientCode']}", headers=headers, files={'file': (new_ipa_name, f, 'application/octet-stream')}, timeout=180)
+            
+            if response.status_code != 200:
+                raise Exception(f"Failed to upload iOS file to the server. Status code: {response.status_code}. Response: {response.json()}")
+            
+            logger.info(f"iOS file uploaded to the server. URL: {response.json()['url']}")
+            ios_app_url = f"api/files/secured/file/{mobileApp['clientCode']}/_withInClient/{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.ipa"
+            
+        except Exception as ios_error:
+            logger.error(f"iOS build error: {ios_error}")
+            # If Android was successful but iOS failed, we'll still report partial success
+            if android_app_url:
+                logger.warning("iOS build failed but Android build succeeded. Continuing with partial success.")
+            else:
+                raise ios_error
+        finally:
+            # Cleanup keychain
+            if keychain_path:
+                cleanup_keychain(keychain_path)
 
-    requests.post(f"{url_prefix}/api/ui/applications/mobileApps/status/{mobileApp['id']}", headers=headers, json={
-        "status": "SUCCESS", 
-        "androidAppURL": f"api/files/secured/file/{mobileApp['clientCode']}/_withInClient/{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.aab",
-    })
+    # ===================== Update Status =====================
+    if android_app_url or ios_app_url:
+        status_payload = {"status": "SUCCESS"}
+        if android_app_url:
+            status_payload["androidAppURL"] = android_app_url
+        if ios_app_url:
+            status_payload["iosAppURL"] = ios_app_url
+        
+        requests.post(f"{url_prefix}/api/ui/applications/mobileApps/status/{mobileApp['id']}", headers=headers, json=status_payload)
+        logger.info(f"Updated the status to SUCCESS")
+    else:
+        raise Exception("No builds were successful")
 
-    logger.info(f"Updated the status to SUCCESS")
-
-    # Delete the folder
-    shutil.rmtree(uuid)
-    logger.info(f"Deleted the folder: {uuid}")
+    # Delete the folder (unless --keep-build is specified)
+    if args.keep_build:
+        logger.info(f"Keeping build folder (--keep-build): {uuid}")
+    else:
+        shutil.rmtree(uuid)
+        logger.info(f"Deleted the folder: {uuid}")
 
 except Exception as e:    
     stack_trace = traceback.format_exc()
@@ -403,6 +897,3 @@ except Exception as e:
     logger.error(f"Stack trace: {stack_trace}")
     requests.post(f"{url_prefix}/api/ui/applications/mobileApps/status/{mobileApp['id']}", headers=headers, json={"status": "FAILED", "errorMessage": str(e)})
     exit(1)
-
-# if 'ios' in mobileApp and mobileApp['ios']:
-#     os.system(f"cd {uuid} && flutter build ipa --release")
