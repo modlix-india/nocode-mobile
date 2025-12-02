@@ -509,14 +509,13 @@ def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name, 
     )
     
     # Use certificate hash if provided, otherwise use "Apple Distribution"
-    # Note: xcodebuild may look for "iOS Distribution" but modern certificates use "Apple Distribution"
-    # We'll try "Apple Distribution" first, but xcodebuild might need "iOS Distribution" for compatibility
+    # Modern certificates are "Apple Distribution", not "iOS Distribution"
+    # xcodebuild should accept "Apple Distribution" for App Store distribution certificates
     if cert_hash:
         code_sign_identity = cert_hash
     else:
-        # Try "iOS Distribution" as xcodebuild might be looking for that name
-        # Even though the certificate is "Apple Distribution", xcodebuild may accept "iOS Distribution"
-        code_sign_identity = "iOS Distribution"
+        # Use "Apple Distribution" - this matches the actual certificate name
+        code_sign_identity = "Apple Distribution"
     
     # Update CODE_SIGN_IDENTITY to use certificate hash or Apple Distribution
     content = re.sub(
@@ -1219,12 +1218,12 @@ try :
             logger.info("Verifying certificate matches team ID...")
             verify_signing_certificate(keychain_path, ios_creds['team_id'], "iOS Distribution")
             
-            # Use "iOS Distribution" instead of certificate hash
-            # xcodebuild looks for "iOS Distribution" even though the certificate is "Apple Distribution"
+            # Use "Apple Distribution" instead of certificate hash
+            # The certificate is "Apple Distribution", so we need to match that name
             # Using the hash requires xcodebuild to access the keychain to look it up,
             # which it can't do reliably with temporary keychains
-            cert_hash = None  # Don't use hash, use "iOS Distribution" instead
-            logger.info("Will use 'iOS Distribution' for CODE_SIGN_IDENTITY (xcodebuild will find it by name)")
+            cert_hash = None  # Don't use hash, use "Apple Distribution" instead
+            logger.info("Will use 'Apple Distribution' for CODE_SIGN_IDENTITY (xcodebuild will find it by name)")
             
             # Install provisioning profile
             logger.info(f"Installing provisioning profile from: {profile_path}")
