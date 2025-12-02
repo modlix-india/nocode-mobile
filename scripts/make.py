@@ -1045,6 +1045,41 @@ try :
             keychain_path = f"{os.path.expanduser('~')}/Library/Keychains/{persistent_keychain_name}"
             
             # Create or use existing persistent keychain
+            # If keychain exists but we can't unlock it, delete and recreate it
+            if os.path.exists(keychain_path):
+                logger.info(f"=== Checking existing persistent keychain: {persistent_keychain_name} ===")
+                logger.info(f"Keychain path: {keychain_path}")
+                
+                # Try to unlock with our password to verify we have access
+                unlock_test = subprocess.run(
+                    ['security', 'unlock-keychain', '-p', persistent_keychain_password, keychain_path],
+                    capture_output=True, text=True
+                )
+                
+                if unlock_test.returncode != 0:
+                    logger.warning(f"Existing keychain cannot be unlocked with our password: {unlock_test.stderr}")
+                    logger.info("Deleting existing keychain to recreate with known password...")
+                    # Remove from search list first
+                    list_result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
+                    keychains = [k.strip().replace('"', '') for k in list_result.stdout.strip().split('\n') if k.strip()]
+                    if keychain_path in keychains:
+                        keychains.remove(keychain_path)
+                        subprocess.run(['security', 'list-keychains', '-d', 'user', '-s'] + keychains, capture_output=True, text=True)
+                    
+                    # Delete the keychain
+                    delete_result = subprocess.run(
+                        ['security', 'delete-keychain', keychain_path],
+                        capture_output=True, text=True
+                    )
+                    if delete_result.returncode == 0:
+                        logger.info("✓ Deleted existing keychain")
+                    else:
+                        logger.warning(f"Could not delete keychain: {delete_result.stderr}")
+                    # Fall through to create new keychain
+                else:
+                    logger.info("✓ Existing keychain is accessible")
+            
+            # Create keychain if it doesn't exist (or was just deleted)
             if not os.path.exists(keychain_path):
                 logger.info(f"=== Creating persistent keychain: {persistent_keychain_name} ===")
                 logger.info(f"Keychain path: {keychain_path}")
@@ -1063,7 +1098,6 @@ try :
                 )
             else:
                 logger.info(f"=== Using existing persistent keychain: {persistent_keychain_name} ===")
-                logger.info(f"Keychain path: {keychain_path}")
             
             # Ensure keychain is unlocked
             unlock_result = subprocess.run(
@@ -1071,7 +1105,7 @@ try :
                 capture_output=True, text=True
             )
             if unlock_result.returncode != 0:
-                logger.warning(f"Could not unlock keychain: {unlock_result.stderr}")
+                raise Exception(f"Failed to unlock keychain: {unlock_result.stderr}")
             else:
                 logger.info("✓ Keychain unlocked")
             
