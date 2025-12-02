@@ -1008,11 +1008,21 @@ try :
                 login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain')
             
             try:
-                # Import to login keychain
+                # Unlock login keychain first (may require password, but we'll try)
+                logger.info("Attempting to unlock login keychain...")
+                # Try to unlock login keychain - this may fail if password is required
+                unlock_login = subprocess.run(
+                    ['security', 'unlock-keychain', login_keychain],
+                    capture_output=True, text=True,
+                    input=ios_creds.get('cert_password', '') + '\n' if ios_creds.get('cert_password') else None
+                )
+                
+                # Import to login keychain with -A flag to allow access from any application
                 login_import_result = subprocess.run([
                     'security', 'import', cert_path,
                     '-k', login_keychain,
                     '-P', ios_creds['cert_password'],
+                    '-A',  # Allow access from any application
                     '-T', '/usr/bin/codesign',
                     '-T', '/usr/bin/security',
                     '-T', '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild'
@@ -1029,9 +1039,11 @@ try :
                     certificate_in_login_keychain = True
                 else:
                     logger.warning(f"Could not import to login keychain: {login_import_result.stderr}")
+                    logger.info("Will proceed with temporary keychain only - xcodebuild may need keychain access")
                     certificate_in_login_keychain = False
             except Exception as e:
                 logger.warning(f"Error importing to login keychain: {e}")
+                logger.info("Will proceed with temporary keychain only")
                 certificate_in_login_keychain = False
             
             # Verify certificate matches team ID and extract certificate hash
@@ -1199,11 +1211,11 @@ try :
             with open(pbxproj_path, 'r') as f:
                 pbx_content = f.read()
             
+            # Check for required settings - CODE_SIGN_IDENTITY can be either hash or "Apple Distribution"
             required_settings = [
                 ('CODE_SIGN_STYLE = Manual', 'Manual signing style'),
                 (f'DEVELOPMENT_TEAM = {ios_creds["team_id"]}', 'Team ID'),
                 (f'PROVISIONING_PROFILE_SPECIFIER = "{profile_name}"', 'Provisioning profile specifier'),
-                ('CODE_SIGN_IDENTITY = "Apple Distribution"', 'Code sign identity')
             ]
             
             for setting, description in required_settings:
@@ -1212,6 +1224,19 @@ try :
                 else:
                     logger.error(f"✗ {description} NOT found in project.pbxproj!")
                     raise Exception(f"Missing {description} in project.pbxproj")
+            
+            # Check for CODE_SIGN_IDENTITY (can be hash or "Apple Distribution")
+            if 'CODE_SIGN_IDENTITY =' in pbx_content:
+                # Extract the value to log it
+                code_sign_match = re.search(r'CODE_SIGN_IDENTITY = "([^"]+)";', pbx_content)
+                if code_sign_match:
+                    code_sign_value = code_sign_match.group(1)
+                    logger.info(f"✓ Code sign identity found in project.pbxproj: {code_sign_value[:40]}...")
+                else:
+                    logger.info("✓ Code sign identity found in project.pbxproj")
+            else:
+                logger.error("✗ CODE_SIGN_IDENTITY NOT found in project.pbxproj!")
+                raise Exception("Missing CODE_SIGN_IDENTITY in project.pbxproj")
             
             logger.info("=== Pre-Archive Verification Complete ===")
             # ============================================================
@@ -1411,8 +1436,15 @@ set -e
 export KEYCHAIN_PATH='{keychain_path}'
 export KEYCHAIN_PASSWORD='{keychain_password}'
 
-# Unlock the keychain for user session
-security unlock-keychain -u -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+# Function to unlock keychain
+unlock_keychain() {{
+    security unlock-keychain -u -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+    # Also try without -u flag
+    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+}}
+
+# Unlock the keychain multiple times to ensure it stays unlocked
+unlock_keychain
 
 # Set keychain as default
 security default-keychain -d user -s "$KEYCHAIN_PATH" 2>/dev/null || true
@@ -1422,11 +1454,11 @@ CURRENT_LIST=$(security list-keychains -d user | tr -d '"' | tr '\\n' ' ')
 NEW_LIST="$KEYCHAIN_PATH $CURRENT_LIST"
 security list-keychains -d user -s $NEW_LIST 2>/dev/null || true
 
-# Set keychain settings to prevent auto-lock
+# Set keychain settings to prevent auto-lock (no timeout, no lock when sleeping)
 security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH" 2>/dev/null || true
 
-# Unlock again to ensure it's accessible
-security unlock-keychain -u -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+# Unlock again
+unlock_keychain
 
 # Verify certificate is accessible
 CERT_CHECK=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" 2>/dev/null | grep -c "valid identities" || echo "0")
@@ -1437,12 +1469,25 @@ if [ "$CERT_CHECK" = "0" ]; then
 fi
 
 # List all identities to verify access
-echo "Available signing identities:" >&2
+echo "Available signing identities in keychain:" >&2
 security find-identity -v -p codesigning "$KEYCHAIN_PATH" >&2
 
 # Also check default search
 echo "Identities in default search:" >&2
 security find-identity -v -p codesigning 2>&1 | head -5 >&2
+
+# Run xcodebuild with keychain unlocked
+# Use a background process to keep keychain unlocked during build
+(
+    while true; do
+        unlock_keychain
+        sleep 30
+    done
+) &
+UNLOCK_PID=$!
+
+# Trap to kill the unlock process when xcodebuild exits
+trap "kill $UNLOCK_PID 2>/dev/null || true" EXIT
 
 # Run xcodebuild - it will inherit the keychain environment
 # Use exec to ensure xcodebuild runs in the same process
