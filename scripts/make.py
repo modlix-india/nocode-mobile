@@ -1348,14 +1348,19 @@ security list-keychains -d user -s '{keychain_path}' $(security list-keychains -
 # Run xcodebuild
 exec xcodebuild "$@"
 """
-                wrapper_path = f"./{uuid}/ios/xcodebuild_wrapper.sh"
+                # Use absolute path for wrapper script
+                wrapper_path = os.path.abspath(f"./{uuid}/ios/xcodebuild_wrapper.sh")
+                wrapper_dir = os.path.dirname(wrapper_path)
+                os.makedirs(wrapper_dir, exist_ok=True)
+                
                 with open(wrapper_path, 'w') as f:
                     f.write(wrapper_script)
                 os.chmod(wrapper_path, 0o755)
+                logger.info(f"Created wrapper script at: {wrapper_path}")
                 
-                # Use the wrapper script
+                # Use the wrapper script - use just the filename since we're changing to ios directory
                 archive_cmd_wrapped = [
-                    wrapper_path,
+                    './xcodebuild_wrapper.sh',
                     'archive',
                     '-workspace', 'Runner.xcworkspace',
                     '-scheme', 'Runner',
@@ -1377,8 +1382,9 @@ exec xcodebuild "$@"
                 # Clean up wrapper script
                 try:
                     os.remove(wrapper_path)
-                except:
-                    pass
+                    logger.info("Cleaned up wrapper script")
+                except Exception as e:
+                    logger.warning(f"Could not remove wrapper script: {e}")
                 
                 if archive_result.returncode != 0:
                     raise Exception("xcodebuild archive failed")
