@@ -967,8 +967,69 @@ try :
             ios_creds = get_ios_credentials(mobileApp)
             logger.info(f"iOS build mode: {ios_creds['mode']}")
             
-            # Create temporary keychain
-            keychain_path = create_temporary_keychain(keychain_name, keychain_password)
+            # Use a persistent keychain instead of temporary one
+            # xcodebuild cannot access private keys in temporary keychains due to macOS security
+            # Using a persistent keychain allows xcodebuild to access the certificate
+            persistent_keychain_name = "build.keychain-db"
+            persistent_keychain_password = "build_keychain_password"  # Use a fixed password for persistent keychain
+            keychain_path = f"{os.path.expanduser('~')}/Library/Keychains/{persistent_keychain_name}"
+            
+            # Create or use existing persistent keychain
+            if not os.path.exists(keychain_path):
+                logger.info(f"=== Creating persistent keychain: {persistent_keychain_name} ===")
+                logger.info(f"Keychain path: {keychain_path}")
+                create_result = subprocess.run(
+                    ['security', 'create-keychain', '-p', persistent_keychain_password, keychain_path],
+                    capture_output=True, text=True
+                )
+                if create_result.returncode != 0:
+                    raise Exception(f"Failed to create persistent keychain: {create_result.stderr}")
+                logger.info("✓ Persistent keychain created")
+                
+                # Configure keychain settings
+                subprocess.run(
+                    ['security', 'set-keychain-settings', '-lut', '21600', keychain_path],
+                    capture_output=True, text=True
+                )
+            else:
+                logger.info(f"=== Using existing persistent keychain: {persistent_keychain_name} ===")
+                logger.info(f"Keychain path: {keychain_path}")
+            
+            # Ensure keychain is unlocked
+            unlock_result = subprocess.run(
+                ['security', 'unlock-keychain', '-p', persistent_keychain_password, keychain_path],
+                capture_output=True, text=True
+            )
+            if unlock_result.returncode != 0:
+                logger.warning(f"Could not unlock keychain: {unlock_result.stderr}")
+            else:
+                logger.info("✓ Keychain unlocked")
+            
+            # Ensure keychain is in search list and is first
+            list_result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
+            keychains = [k.strip().replace('"', '') for k in list_result.stdout.strip().split('\n') if k.strip()]
+            if keychain_path not in keychains:
+                keychains.insert(0, keychain_path)
+            elif keychains[0] != keychain_path:
+                keychains.remove(keychain_path)
+                keychains.insert(0, keychain_path)
+            
+            set_result = subprocess.run(
+                ['security', 'list-keychains', '-d', 'user', '-s'] + keychains,
+                capture_output=True, text=True
+            )
+            if set_result.returncode == 0:
+                logger.info(f"✓ Keychain is first in search list")
+            
+            # Set as default keychain
+            subprocess.run(
+                ['security', 'default-keychain', '-d', 'user', '-s', keychain_path],
+                capture_output=True, text=True
+            )
+            logger.info(f"✓ Keychain set as default")
+            
+            # Update keychain_password variable for use in rest of code
+            keychain_password = persistent_keychain_password
             
             # Prepare certificate and provisioning profile files
             if ios_creds['mode'] == 'TENANT_ACCOUNT':
@@ -1632,8 +1693,12 @@ exec xcodebuild "$@"
                 except Exception as e:
                     logger.warning(f"Error cleaning up login keychain: {e}")
             
-            # Cleanup keychain
-            if keychain_path:
+            # Don't cleanup persistent keychain - it's reused across builds
+            # The persistent keychain allows xcodebuild to access certificates reliably
+            if keychain_path and 'build.keychain-db' in keychain_path:
+                logger.info(f"Persistent keychain will be reused: {keychain_path}")
+            elif keychain_path:
+                # Only cleanup if it's a temporary keychain (shouldn't happen now)
                 cleanup_keychain(keychain_path)
 
     # ===================== Update Status =====================
