@@ -1046,26 +1046,16 @@ try :
                 logger.info("Will proceed with temporary keychain only")
                 certificate_in_login_keychain = False
             
-            # Verify certificate matches team ID and extract certificate hash
+            # Verify certificate matches team ID
             logger.info("Verifying certificate matches team ID...")
             verify_signing_certificate(keychain_path, ios_creds['team_id'], "iOS Distribution")
             
-            # Extract certificate hash for use in CODE_SIGN_IDENTITY
-            cert_hash = None
-            find_identity_result = subprocess.run(
-                ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
-                capture_output=True, text=True
-            )
-            if find_identity_result.returncode == 0 and find_identity_result.stdout:
-                # Extract the identity hash (40 char SHA1)
-                identity_match = re.search(r'\d+\)\s+([A-F0-9]{40})', find_identity_result.stdout)
-                if identity_match:
-                    cert_hash = identity_match.group(1)
-                    logger.info(f"Extracted certificate hash: {cert_hash[:20]}... (will use in CODE_SIGN_IDENTITY)")
-                else:
-                    logger.warning("Could not extract certificate hash, will use 'Apple Distribution'")
-            else:
-                logger.warning("Could not find certificate identity, will use 'Apple Distribution'")
+            # Use "Apple Distribution" instead of certificate hash
+            # xcodebuild can find certificates by name when keychain is properly set up
+            # Using the hash requires xcodebuild to access the keychain to look it up,
+            # which it can't do reliably with temporary keychains
+            cert_hash = None  # Don't use hash, use "Apple Distribution" instead
+            logger.info("Will use 'Apple Distribution' for CODE_SIGN_IDENTITY (xcodebuild will find it by name)")
             
             # Install provisioning profile
             logger.info(f"Installing provisioning profile from: {profile_path}")
