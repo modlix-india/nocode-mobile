@@ -450,6 +450,97 @@ def verify_signing_certificate(keychain_path, team_id, expected_cert_type="iOS D
     return True
 
 
+def extract_profile_certificates(profile_path):
+    """Extract certificate information from a provisioning profile.
+    
+    Returns a list of certificate SHA-1 fingerprints included in the profile.
+    """
+    with open(profile_path, 'rb') as f:
+        content = f.read()
+    
+    # Extract plist from the signed profile
+    start = content.find(b'<?xml')
+    end = content.find(b'</plist>') + len(b'</plist>')
+    if start == -1 or end == -1:
+        return []
+    
+    plist_data = content[start:end]
+    profile_info = plistlib.loads(plist_data)
+    
+    # Get the DeveloperCertificates array (contains DER-encoded certificates)
+    dev_certs = profile_info.get('DeveloperCertificates', [])
+    
+    cert_fingerprints = []
+    for cert_data in dev_certs:
+        # Calculate SHA-1 fingerprint of the certificate
+        import hashlib
+        fingerprint = hashlib.sha1(cert_data).hexdigest().upper()
+        cert_fingerprints.append(fingerprint)
+    
+    return cert_fingerprints
+
+
+def get_certificate_fingerprint_from_keychain(keychain_path, team_id):
+    """Get the SHA-1 fingerprint of the signing certificate in the keychain."""
+    result = subprocess.run(
+        ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+        capture_output=True, text=True
+    )
+    
+    if result.returncode != 0:
+        return None
+    
+    # Parse the output to find certificate matching team ID
+    # Format: "   1) ABC123DEF456... \"Apple Distribution: Company Name (TEAMID)\""
+    for line in result.stdout.split('\n'):
+        if team_id in line:
+            # Extract the certificate hash (40 hex chars)
+            cert_match = re.search(r'\d+\)\s+([A-F0-9]{40})', line)
+            if cert_match:
+                return cert_match.group(1)
+    
+    return None
+
+
+def verify_certificate_in_profile(profile_path, keychain_path, team_id):
+    """Verify that the signing certificate is included in the provisioning profile.
+    
+    Returns (is_valid, error_message)
+    """
+    logger.info("=== Verifying certificate is in provisioning profile ===")
+    
+    # Get certificate fingerprints from profile
+    profile_fingerprints = extract_profile_certificates(profile_path)
+    logger.info(f"Certificates in provisioning profile: {len(profile_fingerprints)}")
+    for fp in profile_fingerprints:
+        logger.info(f"  - {fp}")
+    
+    # Get signing certificate fingerprint from keychain
+    signing_cert_fp = get_certificate_fingerprint_from_keychain(keychain_path, team_id)
+    if not signing_cert_fp:
+        return False, f"Could not find signing certificate for team ID {team_id} in keychain"
+    
+    logger.info(f"Signing certificate fingerprint: {signing_cert_fp}")
+    
+    # Check if signing certificate is in profile
+    if signing_cert_fp in profile_fingerprints:
+        logger.info("✓ Signing certificate IS included in provisioning profile")
+        return True, None
+    else:
+        error_msg = (
+            f"CERTIFICATE MISMATCH: The signing certificate ({signing_cert_fp}) "
+            f"is NOT included in the provisioning profile.\n"
+            f"The provisioning profile contains certificates: {profile_fingerprints}\n"
+            f"This usually means the provisioning profile was created with a different certificate.\n"
+            f"Solutions:\n"
+            f"  1. Regenerate the provisioning profile using the same certificate (modlix-distro2.p12)\n"
+            f"  2. Or use the certificate that matches the provisioning profile\n"
+            f"  3. Check Apple Developer Portal to ensure the certificate is added to the provisioning profile"
+        )
+        logger.error(f"✗ {error_msg}")
+        return False, error_msg
+
+
 def install_provisioning_profile(profile_path):
     """Install a provisioning profile."""
     profiles_dir = os.path.expanduser('~/Library/MobileDevice/Provisioning Profiles')
@@ -1167,52 +1258,56 @@ try :
             # Import certificate to temporary keychain
             import_certificate_to_keychain(keychain_path, cert_path, ios_creds['cert_password'], keychain_password)
             
-            # Also import to login keychain temporarily so xcodebuild can find it
-            # xcodebuild always searches the login keychain, so this ensures it's accessible
+            # Optionally import to login keychain if LOGIN_KEYCHAIN_PASSWORD is set
+            # This can help xcodebuild find the certificate, but is not required
+            # when using a properly configured build keychain
             certificate_in_login_keychain = False
-            logger.info("Importing certificate to login keychain for xcodebuild access...")
-            login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain-db')
-            if not os.path.exists(login_keychain):
-                login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain')
+            login_keychain_password = os.environ.get('LOGIN_KEYCHAIN_PASSWORD')
             
-            try:
-                # Unlock login keychain first (may require password, but we'll try)
-                logger.info("Attempting to unlock login keychain...")
-                # Try to unlock login keychain - this may fail if password is required
-                unlock_login = subprocess.run(
-                    ['security', 'unlock-keychain', login_keychain],
-                    capture_output=True, text=True,
-                    input=ios_creds.get('cert_password', '') + '\n' if ios_creds.get('cert_password') else None
-                )
+            if login_keychain_password:
+                logger.info("Importing certificate to login keychain for xcodebuild access...")
+                login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain-db')
+                if not os.path.exists(login_keychain):
+                    login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain')
                 
-                # Import to login keychain with -A flag to allow access from any application
-                login_import_result = subprocess.run([
-                    'security', 'import', cert_path,
-                    '-k', login_keychain,
-                    '-P', ios_creds['cert_password'],
-                    '-A',  # Allow access from any application
-                    '-T', '/usr/bin/codesign',
-                    '-T', '/usr/bin/security',
-                    '-T', '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild'
-                ], capture_output=True, text=True)
-                
-                if login_import_result.returncode == 0:
-                    logger.info("✓ Certificate imported to login keychain")
-                    # Set key partition list for login keychain
-                    subprocess.run([
-                        'security', 'set-key-partition-list',
-                        '-S', 'apple-tool:,apple:,codesign:',
-                        '-s', '-k', ios_creds['cert_password'], login_keychain
-                    ], capture_output=True, text=True)
-                    certificate_in_login_keychain = True
-                else:
-                    logger.warning(f"Could not import to login keychain: {login_import_result.stderr}")
-                    logger.info("Will proceed with temporary keychain only - xcodebuild may need keychain access")
-                    certificate_in_login_keychain = False
-            except Exception as e:
-                logger.warning(f"Error importing to login keychain: {e}")
-                logger.info("Will proceed with temporary keychain only")
-                certificate_in_login_keychain = False
+                try:
+                    # Unlock login keychain with provided password
+                    logger.info("Unlocking login keychain with provided password...")
+                    unlock_login = subprocess.run(
+                        ['security', 'unlock-keychain', '-p', login_keychain_password, login_keychain],
+                        capture_output=True, text=True
+                    )
+                    
+                    if unlock_login.returncode != 0:
+                        logger.warning(f"Could not unlock login keychain: {unlock_login.stderr}")
+                    else:
+                        # Import to login keychain with -A flag to allow access from any application
+                        login_import_result = subprocess.run([
+                            'security', 'import', cert_path,
+                            '-k', login_keychain,
+                            '-P', ios_creds['cert_password'],
+                            '-A',  # Allow access from any application
+                            '-T', '/usr/bin/codesign',
+                            '-T', '/usr/bin/security',
+                            '-T', '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild'
+                        ], capture_output=True, text=True)
+                        
+                        if login_import_result.returncode == 0:
+                            logger.info("✓ Certificate imported to login keychain")
+                            # Set key partition list for login keychain
+                            subprocess.run([
+                                'security', 'set-key-partition-list',
+                                '-S', 'apple-tool:,apple:,codesign:',
+                                '-s', '-k', login_keychain_password, login_keychain
+                            ], capture_output=True, text=True)
+                            certificate_in_login_keychain = True
+                        else:
+                            logger.warning(f"Could not import to login keychain: {login_import_result.stderr}")
+                except Exception as e:
+                    logger.warning(f"Error importing to login keychain: {e}")
+            else:
+                logger.info("Skipping login keychain import (LOGIN_KEYCHAIN_PASSWORD not set)")
+                logger.info("Using dedicated build keychain only - this should work for most builds")
             
             # Verify certificate matches team ID
             logger.info("Verifying certificate matches team ID...")
@@ -1237,6 +1332,12 @@ try :
                 logger.info(f"✓ Profile verified at: {installed_profile_path}")
             else:
                 logger.error(f"✗ Profile NOT found at: {installed_profile_path}")
+            
+            # CRITICAL: Verify that the signing certificate is included in the provisioning profile
+            # This is the most common cause of "profile doesn't include certificate" errors
+            is_cert_valid, cert_error = verify_certificate_in_profile(profile_path, keychain_path, ios_creds['team_id'])
+            if not is_cert_valid:
+                raise Exception(cert_error)
             
             # Update Xcode project signing
             logger.info("Updating Xcode project signing configuration...")
