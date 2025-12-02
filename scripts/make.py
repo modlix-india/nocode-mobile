@@ -215,12 +215,19 @@ def import_certificate_to_keychain(keychain_path, cert_path, cert_password, keyc
     
     # Import certificate
     logger.info("Importing certificate into keychain...")
+    # Add xcodebuild to trusted applications so it can access the certificate
+    xcodebuild_path = '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild'
+    if not os.path.exists(xcodebuild_path):
+        # Try alternative location
+        xcodebuild_path = '/usr/bin/xcodebuild'
+    
     result = subprocess.run([
         'security', 'import', cert_path,
         '-k', keychain_path,
         '-P', cert_password,
         '-T', '/usr/bin/codesign',
-        '-T', '/usr/bin/security'
+        '-T', '/usr/bin/security',
+        '-T', xcodebuild_path
     ], capture_output=True, text=True)
     
     if result.returncode != 0:
@@ -230,13 +237,42 @@ def import_certificate_to_keychain(keychain_path, cert_path, cert_password, keyc
     if result.stdout:
         logger.info(f"Import output: {result.stdout}")
     
-    # Set key partition list to allow codesign access
-    logger.info("Setting key partition list for codesign access...")
-    partition_result = subprocess.run([
-        'security', 'set-key-partition-list',
-        '-S', 'apple-tool:,apple:',
-        '-s', '-k', keychain_password, keychain_path
-    ], capture_output=True, text=True)
+    # Set key partition list to allow codesign and xcodebuild access
+    logger.info("Setting key partition list for codesign and xcodebuild access...")
+    # First, get the certificate identity hash to set partition list specifically
+    find_identity_result = subprocess.run(
+        ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+        capture_output=True, text=True
+    )
+    
+    if find_identity_result.returncode == 0 and find_identity_result.stdout:
+        # Extract the identity hash (first 40 chars after the number)
+        identity_match = re.search(r'\d+\)\s+([A-F0-9]{40})', find_identity_result.stdout)
+        if identity_match:
+            identity_hash = identity_match.group(1)
+            logger.info(f"Setting partition list for identity: {identity_hash[:20]}...")
+            
+            # Set partition list for the specific identity
+            partition_result = subprocess.run([
+                'security', 'set-key-partition-list',
+                '-S', 'apple-tool:,apple:,codesign:',
+                '-s', '-k', keychain_password,
+                keychain_path
+            ], capture_output=True, text=True)
+        else:
+            # Fallback to general partition list setting
+            partition_result = subprocess.run([
+                'security', 'set-key-partition-list',
+                '-S', 'apple-tool:,apple:,codesign:',
+                '-s', '-k', keychain_password, keychain_path
+            ], capture_output=True, text=True)
+    else:
+        # Fallback if we can't find the identity
+        partition_result = subprocess.run([
+            'security', 'set-key-partition-list',
+            '-S', 'apple-tool:,apple:,codesign:',
+            '-s', '-k', keychain_password, keychain_path
+        ], capture_output=True, text=True)
     
     if partition_result.returncode != 0:
         logger.warning(f"Warning setting key partition list: {partition_result.stderr}")
@@ -1183,10 +1219,18 @@ try :
                     logger.warning(f"⚠ Default keychain verification failed. Expected: {keychain_path}, Got: {current_default}")
             
             # Ensure keychain is unlocked (xcodebuild may need it unlocked)
-            if ensure_keychain_unlocked(keychain_path, keychain_password):
-                logger.info("✓ Keychain unlocked before archive")
+            # Use -u flag to unlock for user session (not just temporarily)
+            unlock_user_result = subprocess.run(
+                ['security', 'unlock-keychain', '-u', '-p', keychain_password, keychain_path],
+                capture_output=True, text=True
+            )
+            if unlock_user_result.returncode == 0:
+                logger.info("✓ Keychain unlocked for user session")
             else:
-                logger.warning(f"⚠ Could not unlock keychain before archive")
+                logger.warning(f"⚠ Could not unlock keychain for user session: {unlock_user_result.stderr}")
+                # Fallback to regular unlock
+                if ensure_keychain_unlocked(keychain_path, keychain_password):
+                    logger.info("✓ Keychain unlocked (fallback method)")
             
             # Also set keychain settings to prevent auto-lock during build
             settings_result = subprocess.run(
@@ -1195,6 +1239,21 @@ try :
             )
             if settings_result.returncode == 0:
                 logger.info("✓ Keychain settings updated to prevent auto-lock")
+            
+            # Try to add xcodebuild as a trusted application for the keychain
+            # This helps xcodebuild access the certificate
+            logger.info("Configuring keychain trust for xcodebuild...")
+            xcodebuild_path = '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild'
+            if os.path.exists(xcodebuild_path):
+                # Add xcodebuild to keychain access list
+                add_trust_result = subprocess.run(
+                    ['security', 'add-trusted-app', '-k', keychain_path, xcodebuild_path],
+                    capture_output=True, text=True
+                )
+                if add_trust_result.returncode == 0:
+                    logger.info("✓ Added xcodebuild to keychain trusted apps")
+                else:
+                    logger.debug(f"Could not add xcodebuild to trusted apps (may not be necessary): {add_trust_result.stderr}")
             
             # Verify codesign can now see the certificate with default keychain
             logger.info("Re-verifying codesign can access certificate with default keychain...")
@@ -1209,6 +1268,42 @@ try :
                 else:
                     logger.warning("⚠ codesign still cannot see certificate even with default keychain")
                     logger.warning(f"All identities:\n{all_identities}")
+                    
+                    # Last resort: Try to explicitly add the keychain to the search again
+                    logger.info("Attempting to force keychain refresh...")
+                    # Remove and re-add to force refresh
+                    remove_result = subprocess.run(
+                        ['security', 'list-keychains', '-d', 'user', '-s'] + [k for k in new_search_list if k != keychain_path],
+                        capture_output=True, text=True
+                    )
+                    add_back_result = subprocess.run(
+                        ['security', 'list-keychains', '-d', 'user', '-s', keychain_path] + [k for k in new_search_list if k != keychain_path],
+                        capture_output=True, text=True
+                    )
+                    if add_back_result.returncode == 0:
+                        logger.info("✓ Forced keychain refresh")
+                        # Verify again
+                        codesign_check2 = subprocess.run(
+                            ['security', 'find-identity', '-v', '-p', 'codesigning'],
+                            capture_output=True, text=True
+                        )
+                        if codesign_check2.returncode == 0 and ios_creds['team_id'] in codesign_check2.stdout:
+                            logger.info("✓ Certificate now visible after refresh")
+                        else:
+                            logger.warning("⚠ Certificate still not visible after refresh")
+            
+            # Final verification: Check that the certificate is accessible in the specific keychain
+            logger.info("Final verification: Checking certificate in specific keychain...")
+            final_check = subprocess.run(
+                ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+                capture_output=True, text=True
+            )
+            if final_check.returncode == 0 and ios_creds['team_id'] in final_check.stdout:
+                logger.info("✓ Certificate confirmed accessible in keychain")
+                logger.info(f"Certificate details:\n{final_check.stdout}")
+            else:
+                logger.error("✗ Certificate NOT accessible in keychain!")
+                raise Exception("Certificate not accessible in keychain before archive")
             
             # Archive using xcodebuild directly
             archive_path = f"./{uuid}/build/ios/archive/Runner.xcarchive"
@@ -1217,18 +1312,75 @@ try :
             try:
                 # Only pass signing parameters for the Runner target, not globally
                 # The project.pbxproj has been updated with manual signing for Runner
-                archive_cmd = (
-                    f"cd {uuid}/ios && xcodebuild archive "
-                    f"-workspace Runner.xcworkspace "
-                    f"-scheme Runner "
-                    f"-configuration Release "
-                    f"-archivePath ../build/ios/archive/Runner.xcarchive "
-                    f"-destination 'generic/platform=iOS' "
-                    f"ONLY_ACTIVE_ARCH=NO"
+                # Use subprocess instead of os.system to ensure keychain access
+                archive_cmd = [
+                    'xcodebuild', 'archive',
+                    '-workspace', 'Runner.xcworkspace',
+                    '-scheme', 'Runner',
+                    '-configuration', 'Release',
+                    '-archivePath', '../build/ios/archive/Runner.xcarchive',
+                    '-destination', 'generic/platform=iOS',
+                    'ONLY_ACTIVE_ARCH=NO'
+                ]
+                
+                # Set up environment to ensure keychain is accessible
+                env = os.environ.copy()
+                # Ensure the keychain is unlocked in the environment
+                # We'll unlock it right before running xcodebuild
+                logger.info(f"Running xcodebuild archive with keychain: {keychain_path}")
+                
+                # Unlock keychain one more time right before xcodebuild
+                pre_unlock = subprocess.run(
+                    ['security', 'unlock-keychain', '-u', '-p', keychain_password, keychain_path],
+                    capture_output=True, text=True
                 )
-                logger.info(f"Archive command: {archive_cmd}")
-                archive_result = os.system(archive_cmd)
-                if archive_result != 0:
+                if pre_unlock.returncode == 0:
+                    logger.info("✓ Keychain unlocked immediately before xcodebuild")
+                
+                # Create a wrapper script that ensures keychain is unlocked before xcodebuild
+                # This is necessary because xcodebuild spawns processes that need keychain access
+                wrapper_script = f"""#!/bin/bash
+set -e
+# Unlock the keychain before running xcodebuild
+security unlock-keychain -u -p '{keychain_password}' '{keychain_path}' || true
+# Ensure keychain is in search list
+security list-keychains -d user -s '{keychain_path}' $(security list-keychains -d user | tr -d '"' | tr '\\n' ' ')
+# Run xcodebuild
+exec xcodebuild "$@"
+"""
+                wrapper_path = f"./{uuid}/ios/xcodebuild_wrapper.sh"
+                with open(wrapper_path, 'w') as f:
+                    f.write(wrapper_script)
+                os.chmod(wrapper_path, 0o755)
+                
+                # Use the wrapper script
+                archive_cmd_wrapped = [
+                    wrapper_path,
+                    'archive',
+                    '-workspace', 'Runner.xcworkspace',
+                    '-scheme', 'Runner',
+                    '-configuration', 'Release',
+                    '-archivePath', '../build/ios/archive/Runner.xcarchive',
+                    '-destination', 'generic/platform=iOS',
+                    'ONLY_ACTIVE_ARCH=NO'
+                ]
+                
+                logger.info("Running xcodebuild with keychain unlock wrapper...")
+                archive_result = subprocess.run(
+                    archive_cmd_wrapped,
+                    cwd=f"{uuid}/ios",
+                    env=env,
+                    capture_output=False,  # Let output go to stdout/stderr for real-time viewing
+                    text=True
+                )
+                
+                # Clean up wrapper script
+                try:
+                    os.remove(wrapper_path)
+                except:
+                    pass
+                
+                if archive_result.returncode != 0:
                     raise Exception("xcodebuild archive failed")
             finally:
                 # Restore original default keychain if we changed it
