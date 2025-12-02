@@ -981,8 +981,43 @@ try :
                     profile_path = ios_creds['profile_path']
                     logger.info(f"Using provisioning profile from file: {profile_path}")
             
-            # Import certificate to keychain
+            # Import certificate to temporary keychain
             import_certificate_to_keychain(keychain_path, cert_path, ios_creds['cert_password'], keychain_password)
+            
+            # Also import to login keychain temporarily so xcodebuild can find it
+            # xcodebuild always searches the login keychain, so this ensures it's accessible
+            certificate_in_login_keychain = False
+            logger.info("Importing certificate to login keychain for xcodebuild access...")
+            login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain-db')
+            if not os.path.exists(login_keychain):
+                login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain')
+            
+            try:
+                # Import to login keychain
+                login_import_result = subprocess.run([
+                    'security', 'import', cert_path,
+                    '-k', login_keychain,
+                    '-P', ios_creds['cert_password'],
+                    '-T', '/usr/bin/codesign',
+                    '-T', '/usr/bin/security',
+                    '-T', '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild'
+                ], capture_output=True, text=True)
+                
+                if login_import_result.returncode == 0:
+                    logger.info("✓ Certificate imported to login keychain")
+                    # Set key partition list for login keychain
+                    subprocess.run([
+                        'security', 'set-key-partition-list',
+                        '-S', 'apple-tool:,apple:,codesign:',
+                        '-s', '-k', ios_creds['cert_password'], login_keychain
+                    ], capture_output=True, text=True)
+                    certificate_in_login_keychain = True
+                else:
+                    logger.warning(f"Could not import to login keychain: {login_import_result.stderr}")
+                    certificate_in_login_keychain = False
+            except Exception as e:
+                logger.warning(f"Error importing to login keychain: {e}")
+                certificate_in_login_keychain = False
             
             # Verify certificate matches team ID
             logger.info("Verifying certificate matches team ID...")
@@ -1496,6 +1531,36 @@ exec xcodebuild "$@"
             else:
                 raise ios_error
         finally:
+            # Cleanup: Remove certificate from login keychain if we imported it there
+            if 'certificate_in_login_keychain' in locals() and certificate_in_login_keychain:
+                logger.info("Cleaning up certificate from login keychain...")
+                try:
+                    login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain-db')
+                    if not os.path.exists(login_keychain):
+                        login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain')
+                    
+                    # Find and delete the certificate from login keychain
+                    find_result = subprocess.run(
+                        ['security', 'find-identity', '-v', '-p', 'codesigning', login_keychain],
+                        capture_output=True, text=True
+                    )
+                    if find_result.returncode == 0 and ios_creds['team_id'] in find_result.stdout:
+                        # Extract certificate hash
+                        cert_match = re.search(r'\d+\)\s+([A-F0-9]{40})', find_result.stdout)
+                        if cert_match:
+                            cert_hash = cert_match.group(1)
+                            # Delete the certificate
+                            delete_result = subprocess.run(
+                                ['security', 'delete-certificate', '-c', cert_hash, login_keychain],
+                                capture_output=True, text=True
+                            )
+                            if delete_result.returncode == 0:
+                                logger.info("✓ Removed certificate from login keychain")
+                            else:
+                                logger.warning(f"Could not remove certificate from login keychain: {delete_result.stderr}")
+                except Exception as e:
+                    logger.warning(f"Error cleaning up login keychain: {e}")
+            
             # Cleanup keychain
             if keychain_path:
                 cleanup_keychain(keychain_path)
