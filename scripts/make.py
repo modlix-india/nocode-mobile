@@ -497,6 +497,18 @@ def create_export_options_plist(output_path, team_id, bundle_id, profile_name, m
     logger.info(f"Created ExportOptions.plist at {output_path}")
 
 
+def ensure_keychain_unlocked(keychain_path, keychain_password):
+    """Ensure the keychain is unlocked and accessible."""
+    unlock_result = subprocess.run(
+        ['security', 'unlock-keychain', '-p', keychain_password, keychain_path],
+        capture_output=True, text=True
+    )
+    if unlock_result.returncode != 0:
+        logger.warning(f"Could not unlock keychain: {unlock_result.stderr}")
+        return False
+    return True
+
+
 def cleanup_keychain(keychain_path):
     """Delete the temporary keychain."""
     try:
@@ -1101,25 +1113,147 @@ try :
             logger.info("=== Pre-Archive Verification Complete ===")
             # ============================================================
             
+            # Set temporary keychain as default keychain so xcodebuild can find the certificate
+            logger.info("Configuring keychain for xcodebuild access...")
+            
+            # Save current default keychain
+            default_keychain_result = subprocess.run(
+                ['security', 'default-keychain', '-d', 'user'],
+                capture_output=True, text=True
+            )
+            original_default_keychain = None
+            if default_keychain_result.returncode == 0:
+                original_default_keychain = default_keychain_result.stdout.strip().replace('"', '')
+                logger.info(f"Current default keychain: {original_default_keychain}")
+            
+            # Save current search list
+            list_result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
+            original_search_list = []
+            if list_result.returncode == 0:
+                original_search_list = [k.strip().replace('"', '') for k in list_result.stdout.strip().split('\n') if k.strip()]
+                logger.info(f"Current keychain search list: {original_search_list}")
+            
+            # Set temporary keychain as default
+            set_default_result = subprocess.run(
+                ['security', 'default-keychain', '-d', 'user', '-s', keychain_path],
+                capture_output=True, text=True
+            )
+            if set_default_result.returncode != 0:
+                logger.error(f"Failed to set default keychain: {set_default_result.stderr}")
+                raise Exception(f"Failed to set default keychain: {set_default_result.stderr}")
+            logger.info(f"✓ Set temporary keychain as default: {keychain_path}")
+            
+            # Ensure temporary keychain is first in search list (and include system keychains)
+            # We need to include login.keychain and System.keychain for xcodebuild to work properly
+            system_keychains = ['/Library/Keychains/System.keychain', '/Library/Keychains/SystemRootCertificates.keychain']
+            login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain-db')
+            if not os.path.exists(login_keychain):
+                login_keychain = os.path.expanduser('~/Library/Keychains/login.keychain')
+            
+            new_search_list = [keychain_path]
+            if os.path.exists(login_keychain):
+                new_search_list.append(login_keychain)
+            new_search_list.extend([k for k in system_keychains if os.path.exists(k)])
+            
+            # Add any other keychains that were in the original list (except our temp one)
+            for kc in original_search_list:
+                if kc != keychain_path and kc not in new_search_list:
+                    new_search_list.append(kc)
+            
+            set_search_result = subprocess.run(
+                ['security', 'list-keychains', '-d', 'user', '-s'] + new_search_list,
+                capture_output=True, text=True
+            )
+            if set_search_result.returncode == 0:
+                logger.info(f"✓ Updated keychain search list (temp keychain is first)")
+                logger.info(f"New search list: {new_search_list[:3]}... (showing first 3)")
+            else:
+                logger.warning(f"⚠ Could not update search list: {set_search_result.stderr}")
+            
+            # Verify it's set as default
+            verify_default_result = subprocess.run(
+                ['security', 'default-keychain', '-d', 'user'],
+                capture_output=True, text=True
+            )
+            if verify_default_result.returncode == 0:
+                current_default = verify_default_result.stdout.strip().replace('"', '')
+                if current_default == keychain_path:
+                    logger.info(f"✓ Verified temporary keychain is now default")
+                else:
+                    logger.warning(f"⚠ Default keychain verification failed. Expected: {keychain_path}, Got: {current_default}")
+            
+            # Ensure keychain is unlocked (xcodebuild may need it unlocked)
+            if ensure_keychain_unlocked(keychain_path, keychain_password):
+                logger.info("✓ Keychain unlocked before archive")
+            else:
+                logger.warning(f"⚠ Could not unlock keychain before archive")
+            
+            # Also set keychain settings to prevent auto-lock during build
+            settings_result = subprocess.run(
+                ['security', 'set-keychain-settings', '-lut', '21600', keychain_path],
+                capture_output=True, text=True
+            )
+            if settings_result.returncode == 0:
+                logger.info("✓ Keychain settings updated to prevent auto-lock")
+            
+            # Verify codesign can now see the certificate with default keychain
+            logger.info("Re-verifying codesign can access certificate with default keychain...")
+            codesign_check = subprocess.run(
+                ['security', 'find-identity', '-v', '-p', 'codesigning'],
+                capture_output=True, text=True
+            )
+            if codesign_check.returncode == 0:
+                all_identities = codesign_check.stdout
+                if ios_creds['team_id'] in all_identities:
+                    logger.info("✓ codesign can now see certificate with matching team ID")
+                else:
+                    logger.warning("⚠ codesign still cannot see certificate even with default keychain")
+                    logger.warning(f"All identities:\n{all_identities}")
+            
             # Archive using xcodebuild directly
             archive_path = f"./{uuid}/build/ios/archive/Runner.xcarchive"
             logger.info("Step 2: Archiving with xcodebuild")
             
-            # Only pass signing parameters for the Runner target, not globally
-            # The project.pbxproj has been updated with manual signing for Runner
-            archive_cmd = (
-                f"cd {uuid}/ios && xcodebuild archive "
-                f"-workspace Runner.xcworkspace "
-                f"-scheme Runner "
-                f"-configuration Release "
-                f"-archivePath ../build/ios/archive/Runner.xcarchive "
-                f"-destination 'generic/platform=iOS' "
-                f"ONLY_ACTIVE_ARCH=NO"
-            )
-            logger.info(f"Archive command: {archive_cmd}")
-            archive_result = os.system(archive_cmd)
-            if archive_result != 0:
-                raise Exception("xcodebuild archive failed")
+            try:
+                # Only pass signing parameters for the Runner target, not globally
+                # The project.pbxproj has been updated with manual signing for Runner
+                archive_cmd = (
+                    f"cd {uuid}/ios && xcodebuild archive "
+                    f"-workspace Runner.xcworkspace "
+                    f"-scheme Runner "
+                    f"-configuration Release "
+                    f"-archivePath ../build/ios/archive/Runner.xcarchive "
+                    f"-destination 'generic/platform=iOS' "
+                    f"ONLY_ACTIVE_ARCH=NO"
+                )
+                logger.info(f"Archive command: {archive_cmd}")
+                archive_result = os.system(archive_cmd)
+                if archive_result != 0:
+                    raise Exception("xcodebuild archive failed")
+            finally:
+                # Restore original default keychain if we changed it
+                if original_default_keychain:
+                    logger.info(f"Restoring original default keychain: {original_default_keychain}")
+                    restore_result = subprocess.run(
+                        ['security', 'default-keychain', '-d', 'user', '-s', original_default_keychain],
+                        capture_output=True, text=True
+                    )
+                    if restore_result.returncode == 0:
+                        logger.info("✓ Original default keychain restored")
+                    else:
+                        logger.warning(f"⚠ Failed to restore original default keychain: {restore_result.stderr}")
+                
+                # Restore original search list if we changed it
+                if original_search_list:
+                    logger.info("Restoring original keychain search list...")
+                    restore_search_result = subprocess.run(
+                        ['security', 'list-keychains', '-d', 'user', '-s'] + original_search_list,
+                        capture_output=True, text=True
+                    )
+                    if restore_search_result.returncode == 0:
+                        logger.info("✓ Original keychain search list restored")
+                    else:
+                        logger.warning(f"⚠ Failed to restore original search list: {restore_search_result.stderr}")
             
             # Export IPA using xcodebuild
             ipa_output_dir = f"./{uuid}/build/ios/ipa"
