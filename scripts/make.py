@@ -101,36 +101,120 @@ def create_temporary_keychain(keychain_name, keychain_password):
     """Create a temporary keychain for iOS code signing."""
     keychain_path = f"{os.path.expanduser('~')}/Library/Keychains/{keychain_name}"
     
+    logger.info(f"=== Creating temporary keychain: {keychain_name} ===")
+    logger.info(f"Keychain path: {keychain_path}")
+    
     # Delete existing keychain if present
-    subprocess.run(['security', 'delete-keychain', keychain_path], capture_output=True)
+    logger.info("Checking for existing keychain...")
+    delete_result = subprocess.run(['security', 'delete-keychain', keychain_path], capture_output=True, text=True)
+    if delete_result.returncode == 0:
+        logger.info("Deleted existing keychain")
+    else:
+        logger.info("No existing keychain found (this is OK)")
     
     # Create new keychain
+    logger.info("Creating new keychain...")
     result = subprocess.run(
         ['security', 'create-keychain', '-p', keychain_password, keychain_path],
         capture_output=True, text=True
     )
     if result.returncode != 0:
+        logger.error(f"Failed to create keychain. stdout: {result.stdout}, stderr: {result.stderr}")
         raise Exception(f"Failed to create keychain: {result.stderr}")
+    logger.info("Keychain created successfully")
+    
+    # Verify keychain exists
+    if not os.path.exists(keychain_path):
+        raise Exception(f"Keychain file does not exist after creation: {keychain_path}")
+    logger.info(f"✓ Verified keychain file exists: {keychain_path}")
     
     # Set keychain settings
-    subprocess.run(['security', 'set-keychain-settings', '-lut', '21600', keychain_path])
+    logger.info("Setting keychain settings (no timeout, no lock)...")
+    settings_result = subprocess.run(
+        ['security', 'set-keychain-settings', '-lut', '21600', keychain_path],
+        capture_output=True, text=True
+    )
+    if settings_result.returncode != 0:
+        logger.warning(f"Warning setting keychain settings: {settings_result.stderr}")
+    else:
+        logger.info("✓ Keychain settings configured")
     
     # Unlock keychain
-    subprocess.run(['security', 'unlock-keychain', '-p', keychain_password, keychain_path])
+    logger.info("Unlocking keychain...")
+    unlock_result = subprocess.run(
+        ['security', 'unlock-keychain', '-p', keychain_password, keychain_path],
+        capture_output=True, text=True
+    )
+    if unlock_result.returncode != 0:
+        logger.error(f"Failed to unlock keychain. stdout: {unlock_result.stdout}, stderr: {unlock_result.stderr}")
+        raise Exception(f"Failed to unlock keychain: {unlock_result.stderr}")
+    logger.info("✓ Keychain unlocked")
+    
+    # Verify keychain is unlocked
+    verify_result = subprocess.run(
+        ['security', 'show-keychain-info', keychain_path],
+        capture_output=True, text=True
+    )
+    if verify_result.returncode == 0:
+        logger.info(f"✓ Keychain info: {verify_result.stdout.strip()}")
+    else:
+        logger.warning(f"Could not verify keychain info: {verify_result.stderr}")
     
     # Add to search list
-    result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
-    keychains = result.stdout.strip().replace('"', '').split('\n')
+    logger.info("Adding keychain to search list...")
+    list_result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
+    keychains = list_result.stdout.strip().replace('"', '').split('\n')
     keychains = [k.strip() for k in keychains if k.strip()]
-    keychains.insert(0, keychain_path)
-    subprocess.run(['security', 'list-keychains', '-d', 'user', '-s'] + keychains)
+    logger.info(f"Current keychain search list: {keychains}")
     
-    logger.info(f"Created temporary keychain: {keychain_path}")
+    keychains.insert(0, keychain_path)
+    set_result = subprocess.run(
+        ['security', 'list-keychains', '-d', 'user', '-s'] + keychains,
+        capture_output=True, text=True
+    )
+    if set_result.returncode != 0:
+        logger.error(f"Failed to set keychain search list: {set_result.stderr}")
+        raise Exception(f"Failed to set keychain search list: {set_result.stderr}")
+    
+    # Verify keychain is in search list
+    verify_list_result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
+    updated_keychains = verify_list_result.stdout.strip().replace('"', '').split('\n')
+    updated_keychains = [k.strip() for k in updated_keychains if k.strip()]
+    if keychain_path in updated_keychains:
+        logger.info(f"✓ Keychain verified in search list (position: {updated_keychains.index(keychain_path)})")
+    else:
+        logger.error(f"✗ Keychain NOT found in search list!")
+        logger.error(f"Current search list: {updated_keychains}")
+        raise Exception(f"Keychain not in search list after adding: {keychain_path}")
+    
+    logger.info(f"=== Successfully created and configured keychain: {keychain_path} ===")
     return keychain_path
 
 
 def import_certificate_to_keychain(keychain_path, cert_path, cert_password, keychain_password):
     """Import a .p12 certificate into the keychain."""
+    logger.info(f"=== Importing certificate to keychain ===")
+    logger.info(f"Certificate path: {cert_path}")
+    logger.info(f"Keychain path: {keychain_path}")
+    
+    # Verify certificate file exists
+    if not os.path.exists(cert_path):
+        raise Exception(f"Certificate file does not exist: {cert_path}")
+    logger.info(f"✓ Certificate file exists: {cert_path}")
+    
+    # Check file size
+    cert_size = os.path.getsize(cert_path)
+    logger.info(f"Certificate file size: {cert_size} bytes")
+    if cert_size == 0:
+        raise Exception(f"Certificate file is empty: {cert_path}")
+    
+    # Verify keychain exists and is accessible
+    if not os.path.exists(keychain_path):
+        raise Exception(f"Keychain does not exist: {keychain_path}")
+    logger.info(f"✓ Keychain exists: {keychain_path}")
+    
+    # Import certificate
+    logger.info("Importing certificate into keychain...")
     result = subprocess.run([
         'security', 'import', cert_path,
         '-k', keychain_path,
@@ -140,16 +224,124 @@ def import_certificate_to_keychain(keychain_path, cert_path, cert_password, keyc
     ], capture_output=True, text=True)
     
     if result.returncode != 0:
+        logger.error(f"Certificate import failed. stdout: {result.stdout}, stderr: {result.stderr}")
         raise Exception(f"Failed to import certificate: {result.stderr}")
+    logger.info(f"✓ Certificate import command succeeded")
+    if result.stdout:
+        logger.info(f"Import output: {result.stdout}")
     
     # Set key partition list to allow codesign access
-    subprocess.run([
+    logger.info("Setting key partition list for codesign access...")
+    partition_result = subprocess.run([
         'security', 'set-key-partition-list',
         '-S', 'apple-tool:,apple:',
         '-s', '-k', keychain_password, keychain_path
-    ], capture_output=True)
+    ], capture_output=True, text=True)
     
-    logger.info("Certificate imported successfully")
+    if partition_result.returncode != 0:
+        logger.warning(f"Warning setting key partition list: {partition_result.stderr}")
+    else:
+        logger.info("✓ Key partition list configured")
+    
+    # Verify certificate was imported by listing identities
+    logger.info("Verifying certificate import by listing identities...")
+    verify_result = subprocess.run(
+        ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+        capture_output=True, text=True
+    )
+    
+    if verify_result.returncode != 0:
+        logger.error(f"Failed to verify certificate import: {verify_result.stderr}")
+        raise Exception(f"Could not verify certificate import: {verify_result.stderr}")
+    
+    identities = verify_result.stdout.strip()
+    logger.info(f"Found identities in keychain:\n{identities}")
+    
+    if not identities or "0 valid identities found" in identities:
+        logger.error("✗ No valid signing identities found in keychain!")
+        raise Exception("No valid signing identities found after certificate import")
+    
+    # Check for iOS Distribution certificate
+    if "iPhone Distribution" in identities or "Apple Distribution" in identities:
+        logger.info("✓ Found iOS Distribution certificate")
+    else:
+        logger.warning("⚠ Warning: No 'iPhone Distribution' or 'Apple Distribution' certificate found")
+        logger.warning("This may cause signing issues if the certificate type is incorrect")
+    
+    logger.info("=== Certificate imported and verified successfully ===")
+
+
+def verify_signing_certificate(keychain_path, team_id, expected_cert_type="iOS Distribution"):
+    """Verify that a signing certificate matching the team ID exists in the keychain."""
+    logger.info(f"=== Verifying signing certificate ===")
+    logger.info(f"Team ID: {team_id}")
+    logger.info(f"Expected certificate type: {expected_cert_type}")
+    
+    # Find all identities in the keychain
+    result = subprocess.run(
+        ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+        capture_output=True, text=True
+    )
+    
+    if result.returncode != 0:
+        logger.error(f"Failed to find identities: {result.stderr}")
+        raise Exception(f"Could not find identities in keychain: {result.stderr}")
+    
+    identities_output = result.stdout
+    logger.info(f"All identities in keychain:\n{identities_output}")
+    
+    # Check for iOS Distribution certificate
+    if expected_cert_type == "iOS Distribution":
+        cert_keywords = ["iPhone Distribution", "Apple Distribution"]
+    else:
+        cert_keywords = [expected_cert_type]
+    
+    found_cert = False
+    matching_team_cert = False
+    
+    for line in identities_output.split('\n'):
+        if any(keyword in line for keyword in cert_keywords):
+            found_cert = True
+            logger.info(f"✓ Found {expected_cert_type} certificate: {line}")
+            
+            # Extract certificate hash and get details
+            # Format: "   1) ABC123... \"iPhone Distribution: Company Name (TEAMID)\""
+            if team_id in line:
+                matching_team_cert = True
+                logger.info(f"✓ Certificate matches team ID {team_id}")
+                
+                # Try to get more details about this certificate
+                # Certificate hash format: "   1) ABC123DEF456... \"Certificate Name\""
+                cert_hash_match = re.search(r'\)\s+([A-F0-9]+)', line)
+                if cert_hash_match:
+                    cert_hash = cert_hash_match.group(1)
+                    logger.info(f"Certificate hash: {cert_hash[:20]}... (truncated for display)")
+                    
+                    # Try to get certificate details (optional, may not always work)
+                    try:
+                        cert_details = subprocess.run(
+                            ['security', 'find-certificate', '-c', cert_hash, '-p', keychain_path],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if cert_details.returncode == 0:
+                            logger.info(f"✓ Certificate details retrieved successfully")
+                    except Exception as e:
+                        logger.debug(f"Could not retrieve full certificate details: {e}")
+    
+    if not found_cert:
+        logger.error(f"✗ No {expected_cert_type} certificate found in keychain!")
+        logger.error("Available identities:")
+        logger.error(identities_output)
+        raise Exception(f"No {expected_cert_type} certificate found in keychain")
+    
+    if not matching_team_cert:
+        logger.error(f"✗ No {expected_cert_type} certificate matching team ID {team_id} found!")
+        logger.error("This may cause signing errors. Available certificates:")
+        logger.error(identities_output)
+        raise Exception(f"No {expected_cert_type} certificate matching team ID {team_id} found")
+    
+    logger.info(f"=== Certificate verification successful ===")
+    return True
 
 
 def install_provisioning_profile(profile_path):
@@ -744,6 +936,10 @@ try :
             # Import certificate to keychain
             import_certificate_to_keychain(keychain_path, cert_path, ios_creds['cert_password'], keychain_password)
             
+            # Verify certificate matches team ID
+            logger.info("Verifying certificate matches team ID...")
+            verify_signing_certificate(keychain_path, ios_creds['team_id'], "iOS Distribution")
+            
             # Install provisioning profile
             logger.info(f"Installing provisioning profile from: {profile_path}")
             profile_uuid, profile_name = install_provisioning_profile(profile_path)
@@ -790,12 +986,120 @@ try :
             if prep_result != 0:
                 raise Exception("Flutter iOS build preparation failed")
             
-            # Verify the certificate was imported correctly
+            # ========== Comprehensive Pre-Archive Verification ==========
+            logger.info("=== Pre-Archive Verification ===")
+            
+            # 1. Verify keychain still exists and is accessible
+            if not os.path.exists(keychain_path):
+                raise Exception(f"Keychain no longer exists: {keychain_path}")
+            logger.info(f"✓ Keychain exists: {keychain_path}")
+            
+            # 2. Verify keychain is in search list
+            list_result = subprocess.run(['security', 'list-keychains', '-d', 'user'], capture_output=True, text=True)
+            current_keychains = list_result.stdout.strip().replace('"', '').split('\n')
+            current_keychains = [k.strip() for k in current_keychains if k.strip()]
+            if keychain_path not in current_keychains:
+                logger.error(f"✗ Keychain NOT in search list!")
+                logger.error(f"Current search list: {current_keychains}")
+                logger.info("Attempting to re-add keychain to search list...")
+                current_keychains.insert(0, keychain_path)
+                fix_result = subprocess.run(
+                    ['security', 'list-keychains', '-d', 'user', '-s'] + current_keychains,
+                    capture_output=True, text=True
+                )
+                if fix_result.returncode != 0:
+                    raise Exception(f"Failed to re-add keychain to search list: {fix_result.stderr}")
+                logger.info("✓ Keychain re-added to search list")
+            else:
+                logger.info(f"✓ Keychain verified in search list (position: {current_keychains.index(keychain_path)})")
+            
+            # 3. Verify keychain is unlocked
+            unlock_result = subprocess.run(
+                ['security', 'unlock-keychain', '-p', keychain_password, keychain_path],
+                capture_output=True, text=True
+            )
+            if unlock_result.returncode != 0:
+                logger.warning(f"Keychain unlock check failed: {unlock_result.stderr}")
+            else:
+                logger.info("✓ Keychain is unlocked")
+            
+            # 4. Verify certificate is still in keychain
             cert_identity_result = subprocess.run(
                 ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
                 capture_output=True, text=True
             )
-            logger.info(f"Available signing identities in keychain:\n{cert_identity_result.stdout}")
+            if cert_identity_result.returncode != 0:
+                raise Exception(f"Failed to find identities in keychain: {cert_identity_result.stderr}")
+            
+            identities_output = cert_identity_result.stdout
+            logger.info(f"Available signing identities in keychain:\n{identities_output}")
+            
+            if not identities_output or "0 valid identities found" in identities_output:
+                raise Exception("No valid signing identities found in keychain before archive!")
+            
+            # 5. Verify iOS Distribution certificate exists and matches team ID
+            if ios_creds['team_id'] not in identities_output:
+                logger.error(f"✗ No certificate matching team ID {ios_creds['team_id']} found!")
+                logger.error("Available identities:")
+                logger.error(identities_output)
+                raise Exception(f"No certificate matching team ID {ios_creds['team_id']} found in keychain")
+            
+            has_distribution_cert = any(keyword in identities_output for keyword in ["iPhone Distribution", "Apple Distribution"])
+            if not has_distribution_cert:
+                logger.error("✗ No iOS Distribution certificate found!")
+                logger.error("Available identities:")
+                logger.error(identities_output)
+                raise Exception("No iOS Distribution certificate found in keychain")
+            
+            logger.info(f"✓ Found iOS Distribution certificate matching team ID {ios_creds['team_id']}")
+            
+            # 5b. Verify codesign can see the certificate
+            logger.info("Verifying codesign can access the certificate...")
+            codesign_result = subprocess.run(
+                ['security', 'find-identity', '-v', '-p', 'codesigning'],
+                capture_output=True, text=True
+            )
+            if codesign_result.returncode == 0:
+                all_identities = codesign_result.stdout
+                if ios_creds['team_id'] in all_identities:
+                    logger.info("✓ codesign can see certificate with matching team ID")
+                else:
+                    logger.warning("⚠ codesign cannot see certificate with matching team ID in default search")
+                    logger.warning("This may indicate a keychain search order issue")
+                    logger.info(f"All identities visible to codesign:\n{all_identities}")
+            else:
+                logger.warning(f"Could not verify codesign access: {codesign_result.stderr}")
+            
+            # 6. Verify provisioning profile is still installed
+            if not os.path.exists(installed_profile_path):
+                raise Exception(f"Provisioning profile no longer exists: {installed_profile_path}")
+            logger.info(f"✓ Provisioning profile verified: {installed_profile_path}")
+            
+            # 7. Verify ExportOptions.plist exists
+            if not os.path.exists(export_options_path):
+                raise Exception(f"ExportOptions.plist does not exist: {export_options_path}")
+            logger.info(f"✓ ExportOptions.plist exists: {export_options_path}")
+            
+            # 8. Verify Xcode project signing configuration
+            with open(pbxproj_path, 'r') as f:
+                pbx_content = f.read()
+            
+            required_settings = [
+                ('CODE_SIGN_STYLE = Manual', 'Manual signing style'),
+                (f'DEVELOPMENT_TEAM = {ios_creds["team_id"]}', 'Team ID'),
+                (f'PROVISIONING_PROFILE_SPECIFIER = "{profile_name}"', 'Provisioning profile specifier'),
+                ('CODE_SIGN_IDENTITY = "Apple Distribution"', 'Code sign identity')
+            ]
+            
+            for setting, description in required_settings:
+                if setting in pbx_content:
+                    logger.info(f"✓ {description} found in project.pbxproj")
+                else:
+                    logger.error(f"✗ {description} NOT found in project.pbxproj!")
+                    raise Exception(f"Missing {description} in project.pbxproj")
+            
+            logger.info("=== Pre-Archive Verification Complete ===")
+            # ============================================================
             
             # Archive using xcodebuild directly
             archive_path = f"./{uuid}/build/ios/archive/Runner.xcarchive"
