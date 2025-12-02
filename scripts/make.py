@@ -1341,11 +1341,44 @@ try :
                 # This is necessary because xcodebuild spawns processes that need keychain access
                 wrapper_script = f"""#!/bin/bash
 set -e
-# Unlock the keychain before running xcodebuild
-security unlock-keychain -u -p '{keychain_password}' '{keychain_path}' || true
-# Ensure keychain is in search list
-security list-keychains -d user -s '{keychain_path}' $(security list-keychains -d user | tr -d '"' | tr '\\n' ' ')
-# Run xcodebuild
+export KEYCHAIN_PATH='{keychain_path}'
+export KEYCHAIN_PASSWORD='{keychain_password}'
+
+# Unlock the keychain for user session
+security unlock-keychain -u -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+
+# Set keychain as default
+security default-keychain -d user -s "$KEYCHAIN_PATH" 2>/dev/null || true
+
+# Ensure keychain is first in search list
+CURRENT_LIST=$(security list-keychains -d user | tr -d '"' | tr '\\n' ' ')
+NEW_LIST="$KEYCHAIN_PATH $CURRENT_LIST"
+security list-keychains -d user -s $NEW_LIST 2>/dev/null || true
+
+# Set keychain settings to prevent auto-lock
+security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH" 2>/dev/null || true
+
+# Unlock again to ensure it's accessible
+security unlock-keychain -u -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+
+# Verify certificate is accessible
+CERT_CHECK=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" 2>/dev/null | grep -c "valid identities" || echo "0")
+if [ "$CERT_CHECK" = "0" ]; then
+    echo "Error: Certificate not found in keychain before xcodebuild" >&2
+    security find-identity -v -p codesigning "$KEYCHAIN_PATH" >&2
+    exit 1
+fi
+
+# List all identities to verify access
+echo "Available signing identities:" >&2
+security find-identity -v -p codesigning "$KEYCHAIN_PATH" >&2
+
+# Also check default search
+echo "Identities in default search:" >&2
+security find-identity -v -p codesigning 2>&1 | head -5 >&2
+
+# Run xcodebuild - it will inherit the keychain environment
+# Use exec to ensure xcodebuild runs in the same process
 exec xcodebuild "$@"
 """
                 # Use absolute path for wrapper script
