@@ -409,11 +409,18 @@ def install_provisioning_profile(profile_path):
     return profile_uuid, profile_name
 
 
-def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name):
+def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name, cert_hash=None):
     """Update Xcode project with manual signing configuration.
     
     Sets bundle ID, team ID, and manual signing settings in Runner.xcodeproj only.
     This does NOT affect Pods.xcodeproj.
+    
+    Args:
+        project_dir: Directory containing the iOS project
+        bundle_id: Bundle identifier
+        team_id: Development team ID
+        profile_name: Provisioning profile name
+        cert_hash: Optional certificate hash (SHA1) to use directly instead of name
     """
     pbxproj_path = os.path.join(project_dir, 'ios', 'Runner.xcodeproj', 'project.pbxproj')
     
@@ -421,6 +428,8 @@ def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name):
         content = f.read()
     
     logger.info(f"Updating Xcode project: bundle_id={bundle_id}, team_id={team_id}, profile={profile_name}")
+    if cert_hash:
+        logger.info(f"Using certificate hash for CODE_SIGN_IDENTITY: {cert_hash[:20]}...")
     
     # Update bundle identifier everywhere it appears
     content = re.sub(
@@ -429,10 +438,16 @@ def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name):
         content
     )
     
-    # Update CODE_SIGN_IDENTITY to Apple Distribution (for release builds)
+    # Use certificate hash if provided, otherwise use "Apple Distribution"
+    if cert_hash:
+        code_sign_identity = cert_hash
+    else:
+        code_sign_identity = "Apple Distribution"
+    
+    # Update CODE_SIGN_IDENTITY to use certificate hash or Apple Distribution
     content = re.sub(
         r'"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "[^"]*";',
-        '"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";',
+        f'"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "{code_sign_identity}";',
         content
     )
     
@@ -445,8 +460,8 @@ def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name):
     release_config_pattern = r'(97C147071CF9000F007C117D /\* Release \*/ = \{\s*isa = XCBuildConfiguration;\s*baseConfigurationReference = [^;]+;\s*buildSettings = \{)'
     
     signing_settings = f'''
-				CODE_SIGN_IDENTITY = "Apple Distribution";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
+				CODE_SIGN_IDENTITY = "{code_sign_identity}";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "{code_sign_identity}";
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = {team_id};
 				PROVISIONING_PROFILE_SPECIFIER = "{profile_name}";'''
@@ -1019,9 +1034,26 @@ try :
                 logger.warning(f"Error importing to login keychain: {e}")
                 certificate_in_login_keychain = False
             
-            # Verify certificate matches team ID
+            # Verify certificate matches team ID and extract certificate hash
             logger.info("Verifying certificate matches team ID...")
             verify_signing_certificate(keychain_path, ios_creds['team_id'], "iOS Distribution")
+            
+            # Extract certificate hash for use in CODE_SIGN_IDENTITY
+            cert_hash = None
+            find_identity_result = subprocess.run(
+                ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+                capture_output=True, text=True
+            )
+            if find_identity_result.returncode == 0 and find_identity_result.stdout:
+                # Extract the identity hash (40 char SHA1)
+                identity_match = re.search(r'\d+\)\s+([A-F0-9]{40})', find_identity_result.stdout)
+                if identity_match:
+                    cert_hash = identity_match.group(1)
+                    logger.info(f"Extracted certificate hash: {cert_hash[:20]}... (will use in CODE_SIGN_IDENTITY)")
+                else:
+                    logger.warning("Could not extract certificate hash, will use 'Apple Distribution'")
+            else:
+                logger.warning("Could not find certificate identity, will use 'Apple Distribution'")
             
             # Install provisioning profile
             logger.info(f"Installing provisioning profile from: {profile_path}")
@@ -1038,7 +1070,7 @@ try :
             
             # Update Xcode project signing
             logger.info("Updating Xcode project signing configuration...")
-            update_xcode_project_signing(f"./{uuid}", ios_creds['bundle_id'], ios_creds['team_id'], profile_name)
+            update_xcode_project_signing(f"./{uuid}", ios_creds['bundle_id'], ios_creds['team_id'], profile_name, cert_hash)
             
             # Verify the pbxproj was updated
             pbxproj_path = os.path.join(f"./{uuid}", 'ios', 'Runner.xcodeproj', 'project.pbxproj')
