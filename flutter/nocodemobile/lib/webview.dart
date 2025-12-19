@@ -189,67 +189,65 @@ class _MyWebViewState extends State<MyWebView> {
                     // Create and add new viewport meta tag with zoom prevention
                     var viewport = document.createElement('meta');
                     viewport.name = 'viewport';
-                    viewport.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
+                    viewport.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
                     document.getElementsByTagName('head')[0].appendChild(viewport);
                     
-                    // Store initial scroll position
-                    var lastScrollY = window.scrollY;
+                    // Track keyboard state and scroll position
+                    var keyboardVisible = false;
+                    var scrollBeforeKeyboard = 0;
+                    var isUserScrolling = false;
+                    var scrollTimeout = null;
                     
-                    // Prevent viewport from shifting when keyboard appears
+                    // Detect when user is actively scrolling
+                    var scrollStartY = window.scrollY;
+                    window.addEventListener('touchstart', function() {
+                      scrollStartY = window.scrollY;
+                      isUserScrolling = true;
+                      if (scrollTimeout) clearTimeout(scrollTimeout);
+                      scrollTimeout = setTimeout(function() {
+                        isUserScrolling = false;
+                      }, 150);
+                    });
+                    
+                    // Only prevent unwanted shifts when keyboard appears, not during normal navigation
                     if (window.visualViewport) {
-                      window.visualViewport.addEventListener('resize', function() {
-                        // Prevent the viewport from shifting down when keyboard appears
-                        if (window.scrollY !== lastScrollY && window.scrollY > 0) {
-                          window.scrollTo(0, lastScrollY);
-                        }
-                      });
+                      var initialViewportHeight = window.visualViewport.height;
                       
-                      window.visualViewport.addEventListener('scroll', function() {
-                        // Prevent unwanted scrolling when keyboard appears
-                        if (window.scrollY > 0 && window.visualViewport.height < window.innerHeight) {
-                          window.scrollTo(0, 0);
+                      window.visualViewport.addEventListener('resize', function() {
+                        var currentHeight = window.visualViewport.height;
+                        var heightDiff = initialViewportHeight - currentHeight;
+                        
+                        // Keyboard appeared (viewport got smaller)
+                        if (heightDiff > 150 && !keyboardVisible) {
+                          keyboardVisible = true;
+                          scrollBeforeKeyboard = window.scrollY;
+                          // Only prevent shift if we're at the top and iOS tries to shift down
+                          if (scrollBeforeKeyboard === 0) {
+                            // Prevent the initial unwanted shift
+                            setTimeout(function() {
+                              if (window.scrollY > 0 && !isUserScrolling) {
+                                window.scrollTo(0, 0);
+                              }
+                            }, 50);
+                          }
+                        }
+                        // Keyboard disappeared (viewport got larger)
+                        else if (heightDiff < -150 && keyboardVisible) {
+                          keyboardVisible = false;
                         }
                       });
                     }
                     
-                    // Prevent zoom and viewport shift on input focus
+                    // Prevent zoom on input focus (without interfering with navigation)
                     document.addEventListener('focusin', function(e) {
                       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
-                        // Store current scroll position
-                        lastScrollY = window.scrollY;
-                        
+                        // Only prevent zoom, don't interfere with scroll position
                         setTimeout(function() {
-                          // Prevent zoom
                           document.body.style.zoom = 1.0;
                           if (window.visualViewport) {
                             window.visualViewport.scale = 1.0;
                           }
-                          
-                          // Prevent viewport shift - maintain scroll position
-                          if (window.scrollY !== lastScrollY) {
-                            window.scrollTo(0, lastScrollY);
-                          }
                         }, 100);
-                      }
-                    });
-                    
-                    // Prevent viewport shift when keyboard appears (additional safeguard)
-                    document.addEventListener('focusin', function(e) {
-                      setTimeout(function() {
-                        // Only reset if we're at the top or if keyboard caused a shift
-                        if (window.scrollY > 0 && window.visualViewport && window.visualViewport.height < window.innerHeight) {
-                          window.scrollTo(0, 0);
-                        }
-                      }, 300);
-                    });
-                    
-                    // Prevent shift on window resize (keyboard show/hide)
-                    window.addEventListener('resize', function() {
-                      // If keyboard is visible (viewport height < window height), prevent shift
-                      if (window.visualViewport && window.visualViewport.height < window.innerHeight) {
-                        if (window.scrollY > 0) {
-                          window.scrollTo(0, 0);
-                        }
                       }
                     });
                   })();
