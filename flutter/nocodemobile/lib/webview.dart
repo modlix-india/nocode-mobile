@@ -150,6 +150,9 @@ class _MyWebViewState extends State<MyWebView> {
               javaScriptEnabled: true,
               allowsInlineMediaPlayback: true,
               useOnDownloadStart: true,
+              // Prevent auto-zoom on iOS when input fields are focused
+              minimumZoomScale: Platform.isIOS ? 1.0 : null,
+              maximumZoomScale: Platform.isIOS ? 1.0 : null,
             ),
             onWebViewCreated: (c) async {
               _controller = c;
@@ -167,6 +170,39 @@ class _MyWebViewState extends State<MyWebView> {
               );
             },
             onLoadStop: (c, url) async {
+              // Inject viewport meta tag to prevent zoom on iOS
+              if (Platform.isIOS) {
+                await c.evaluateJavascript(
+                  source: '''
+                  (function() {
+                    // Remove existing viewport meta tag if any
+                    var existingViewport = document.querySelector('meta[name="viewport"]');
+                    if (existingViewport) {
+                      existingViewport.remove();
+                    }
+                    
+                    // Create and add new viewport meta tag with zoom prevention
+                    var viewport = document.createElement('meta');
+                    viewport.name = 'viewport';
+                    viewport.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+                    document.getElementsByTagName('head')[0].appendChild(viewport);
+                    
+                    // Prevent zoom on input focus
+                    document.addEventListener('focusin', function(e) {
+                      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+                        setTimeout(function() {
+                          document.body.style.zoom = 1.0;
+                          if (window.visualViewport) {
+                            window.visualViewport.scale = 1.0;
+                          }
+                        }, 100);
+                      }
+                    });
+                  })();
+                ''',
+                );
+              }
+
               await c.evaluateJavascript(source: _blobHook);
             },
 
