@@ -142,6 +142,8 @@ class _MyWebViewState extends State<MyWebView> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      // Prevent screen from resizing when keyboard appears
+      resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
           InAppWebView(
@@ -153,6 +155,9 @@ class _MyWebViewState extends State<MyWebView> {
               // Prevent auto-zoom on iOS when input fields are focused
               minimumZoomScale: Platform.isIOS ? 1.0 : null,
               maximumZoomScale: Platform.isIOS ? 1.0 : null,
+              // Prevent viewport from resizing when keyboard appears on iOS
+              disableVerticalScroll: false,
+              disableHorizontalScroll: false,
             ),
             onWebViewCreated: (c) async {
               _controller = c;
@@ -170,7 +175,7 @@ class _MyWebViewState extends State<MyWebView> {
               );
             },
             onLoadStop: (c, url) async {
-              // Inject viewport meta tag to prevent zoom on iOS
+              // Inject viewport meta tag to prevent zoom and keyboard shifting on iOS
               if (Platform.isIOS) {
                 await c.evaluateJavascript(
                   source: '''
@@ -184,18 +189,67 @@ class _MyWebViewState extends State<MyWebView> {
                     // Create and add new viewport meta tag with zoom prevention
                     var viewport = document.createElement('meta');
                     viewport.name = 'viewport';
-                    viewport.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+                    viewport.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
                     document.getElementsByTagName('head')[0].appendChild(viewport);
                     
-                    // Prevent zoom on input focus
+                    // Store initial scroll position
+                    var lastScrollY = window.scrollY;
+                    
+                    // Prevent viewport from shifting when keyboard appears
+                    if (window.visualViewport) {
+                      window.visualViewport.addEventListener('resize', function() {
+                        // Prevent the viewport from shifting down when keyboard appears
+                        if (window.scrollY !== lastScrollY && window.scrollY > 0) {
+                          window.scrollTo(0, lastScrollY);
+                        }
+                      });
+                      
+                      window.visualViewport.addEventListener('scroll', function() {
+                        // Prevent unwanted scrolling when keyboard appears
+                        if (window.scrollY > 0 && window.visualViewport.height < window.innerHeight) {
+                          window.scrollTo(0, 0);
+                        }
+                      });
+                    }
+                    
+                    // Prevent zoom and viewport shift on input focus
                     document.addEventListener('focusin', function(e) {
                       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+                        // Store current scroll position
+                        lastScrollY = window.scrollY;
+                        
                         setTimeout(function() {
+                          // Prevent zoom
                           document.body.style.zoom = 1.0;
                           if (window.visualViewport) {
                             window.visualViewport.scale = 1.0;
                           }
+                          
+                          // Prevent viewport shift - maintain scroll position
+                          if (window.scrollY !== lastScrollY) {
+                            window.scrollTo(0, lastScrollY);
+                          }
                         }, 100);
+                      }
+                    });
+                    
+                    // Prevent viewport shift when keyboard appears (additional safeguard)
+                    document.addEventListener('focusin', function(e) {
+                      setTimeout(function() {
+                        // Only reset if we're at the top or if keyboard caused a shift
+                        if (window.scrollY > 0 && window.visualViewport && window.visualViewport.height < window.innerHeight) {
+                          window.scrollTo(0, 0);
+                        }
+                      }, 300);
+                    });
+                    
+                    // Prevent shift on window resize (keyboard show/hide)
+                    window.addEventListener('resize', function() {
+                      // If keyboard is visible (viewport height < window height), prevent shift
+                      if (window.visualViewport && window.visualViewport.height < window.innerHeight) {
+                        if (window.scrollY > 0) {
+                          window.scrollTo(0, 0);
+                        }
                       }
                     });
                   })();
