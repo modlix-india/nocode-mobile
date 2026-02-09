@@ -502,10 +502,42 @@ def get_certificate_fingerprint_from_keychain(keychain_path, team_id):
     return None
 
 
+def get_certificate_fingerprints_from_keychain(keychain_path, team_id):
+    """Get all SHA-1 fingerprints of signing certificates for the team in the keychain."""
+    result = subprocess.run(
+        ['security', 'find-identity', '-v', '-p', 'codesigning', keychain_path],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return []
+    fingerprints = []
+    for line in result.stdout.split('\n'):
+        if team_id in line:
+            cert_match = re.search(r'\d+\)\s+([A-F0-9]{40})', line)
+            if cert_match:
+                fingerprints.append(cert_match.group(1))
+    return fingerprints
+
+
+def get_signing_certificate_fingerprint_for_profile(profile_path, keychain_path, team_id):
+    """Return the certificate fingerprint to use for signing: the keychain cert for this team
+    that is included in the provisioning profile. When multiple certs exist for the same team,
+    this ensures we use the one that matches the profile (avoids xcodebuild picking the wrong one).
+    Returns None if no matching cert found.
+    """
+    profile_fingerprints = set(extract_profile_certificates(profile_path))
+    keychain_fingerprints = get_certificate_fingerprints_from_keychain(keychain_path, team_id)
+    for fp in keychain_fingerprints:
+        if fp in profile_fingerprints:
+            return fp
+    return None
+
+
 def verify_certificate_in_profile(profile_path, keychain_path, team_id):
     """Verify that the signing certificate is included in the provisioning profile.
     
-    Returns (is_valid, error_message)
+    Returns (is_valid, error_message, fingerprint_or_none). When valid, fingerprint is the
+    cert to use for CODE_SIGN_IDENTITY so xcodebuild uses the exact cert in the profile.
     """
     logger.info("=== Verifying certificate is in provisioning profile ===")
     
@@ -515,30 +547,27 @@ def verify_certificate_in_profile(profile_path, keychain_path, team_id):
     for fp in profile_fingerprints:
         logger.info(f"  - {fp}")
     
-    # Get signing certificate fingerprint from keychain
-    signing_cert_fp = get_certificate_fingerprint_from_keychain(keychain_path, team_id)
+    # Use the cert that is both in keychain (for team) and in profile
+    signing_cert_fp = get_signing_certificate_fingerprint_for_profile(profile_path, keychain_path, team_id)
     if not signing_cert_fp:
-        return False, f"Could not find signing certificate for team ID {team_id} in keychain"
-    
-    logger.info(f"Signing certificate fingerprint: {signing_cert_fp}")
-    
-    # Check if signing certificate is in profile
-    if signing_cert_fp in profile_fingerprints:
-        logger.info("✓ Signing certificate IS included in provisioning profile")
-        return True, None
-    else:
+        keychain_fps = get_certificate_fingerprints_from_keychain(keychain_path, team_id)
+        if not keychain_fps:
+            return False, f"Could not find signing certificate for team ID {team_id} in keychain", None
         error_msg = (
-            f"CERTIFICATE MISMATCH: The signing certificate ({signing_cert_fp}) "
-            f"is NOT included in the provisioning profile.\n"
-            f"The provisioning profile contains certificates: {profile_fingerprints}\n"
-            f"This usually means the provisioning profile was created with a different certificate.\n"
+            f"CERTIFICATE MISMATCH: No signing certificate for team {team_id} is included in the provisioning profile.\n"
+            f"Keychain certificates for team: {keychain_fps}\n"
+            f"Provisioning profile certificates: {profile_fingerprints}\n"
             f"Solutions:\n"
-            f"  1. Regenerate the provisioning profile using the same certificate (modlix-distro2.p12)\n"
-            f"  2. Or use the certificate that matches the provisioning profile\n"
-            f"  3. Check Apple Developer Portal to ensure the certificate is added to the provisioning profile"
+            f"  1. Regenerate the provisioning profile to include the certificate installed on this machine\n"
+            f"  2. Or install the certificate that the profile was created with (see profile list above)\n"
+            f"  3. In Apple Developer Portal, edit the profile and ensure the correct certificate is selected"
         )
         logger.error(f"✗ {error_msg}")
-        return False, error_msg
+        return False, error_msg, None
+    
+    logger.info(f"Signing certificate fingerprint (will use for CODE_SIGN_IDENTITY): {signing_cert_fp}")
+    logger.info("✓ Signing certificate IS included in provisioning profile")
+    return True, None, signing_cert_fp
 
 
 def install_provisioning_profile(profile_path):
@@ -1313,13 +1342,6 @@ try :
             logger.info("Verifying certificate matches team ID...")
             verify_signing_certificate(keychain_path, ios_creds['team_id'], "iOS Distribution")
             
-            # Use "Apple Distribution" instead of certificate hash
-            # The certificate is "Apple Distribution", so we need to match that name
-            # Using the hash requires xcodebuild to access the keychain to look it up,
-            # which it can't do reliably with temporary keychains
-            cert_hash = None  # Don't use hash, use "Apple Distribution" instead
-            logger.info("Will use 'Apple Distribution' for CODE_SIGN_IDENTITY (xcodebuild will find it by name)")
-            
             # Install provisioning profile
             logger.info(f"Installing provisioning profile from: {profile_path}")
             profile_uuid, profile_name = install_provisioning_profile(profile_path)
@@ -1333,11 +1355,18 @@ try :
             else:
                 logger.error(f"✗ Profile NOT found at: {installed_profile_path}")
             
-            # CRITICAL: Verify that the signing certificate is included in the provisioning profile
-            # This is the most common cause of "profile doesn't include certificate" errors
-            is_cert_valid, cert_error = verify_certificate_in_profile(profile_path, keychain_path, ios_creds['team_id'])
+            # CRITICAL: Verify that the signing certificate is included in the provisioning profile,
+            # and get the exact fingerprint to use. Using the fingerprint (not "Apple Distribution")
+            # ensures xcodebuild uses the correct cert when multiple identities exist (e.g. MODLIX
+            # "Apple Distribution" vs tenant "iPhone Distribution"), avoiding "profile doesn't
+            # include signing certificate" errors.
+            is_cert_valid, cert_error, cert_hash = verify_certificate_in_profile(profile_path, keychain_path, ios_creds['team_id'])
             if not is_cert_valid:
                 raise Exception(cert_error)
+            if cert_hash:
+                logger.info(f"Using certificate fingerprint for CODE_SIGN_IDENTITY: {cert_hash[:20]}...")
+            else:
+                logger.info("Will use 'Apple Distribution' for CODE_SIGN_IDENTITY (no fingerprint returned)")
             
             # Update Xcode project signing
             logger.info("Updating Xcode project signing configuration...")
