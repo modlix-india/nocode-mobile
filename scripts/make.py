@@ -1822,7 +1822,29 @@ exec xcodebuild "$@"
                 if archive_result.returncode != 0:
                     raise Exception("xcodebuild archive failed")
             finally:
-                # Restore original default keychain if we changed it
+                # Do not restore keychain here - export needs the same keychain as archive.
+                # Restoration happens after export (see below).
+                pass
+            
+            # Export IPA using xcodebuild (must run with same keychain as archive so
+            # the signing identity is found and matches the provisioning profile)
+            try:
+                ipa_output_dir = f"./{uuid}/build/ios/ipa"
+                os.makedirs(ipa_output_dir, exist_ok=True)
+                logger.info("Step 3: Exporting IPA with xcodebuild")
+                export_cmd = (
+                    f"xcodebuild -exportArchive "
+                    f"-archivePath {archive_path} "
+                    f"-exportPath {ipa_output_dir} "
+                    f"-exportOptionsPlist {export_options_path}"
+                )
+                logger.info(f"Export command: {export_cmd}")
+                build_result = os.system(export_cmd)
+                
+                if build_result != 0:
+                    raise Exception("iOS build failed")
+            finally:
+                # Restore keychain only after export so both archive and export use the build keychain
                 if original_default_keychain:
                     logger.info(f"Restoring original default keychain: {original_default_keychain}")
                     restore_result = subprocess.run(
@@ -1833,8 +1855,6 @@ exec xcodebuild "$@"
                         logger.info("✓ Original default keychain restored")
                     else:
                         logger.warning(f"⚠ Failed to restore original default keychain: {restore_result.stderr}")
-                
-                # Restore original search list if we changed it
                 if original_search_list:
                     logger.info("Restoring original keychain search list...")
                     restore_search_result = subprocess.run(
@@ -1845,22 +1865,6 @@ exec xcodebuild "$@"
                         logger.info("✓ Original keychain search list restored")
                     else:
                         logger.warning(f"⚠ Failed to restore original search list: {restore_search_result.stderr}")
-            
-            # Export IPA using xcodebuild
-            ipa_output_dir = f"./{uuid}/build/ios/ipa"
-            os.makedirs(ipa_output_dir, exist_ok=True)
-            logger.info("Step 3: Exporting IPA with xcodebuild")
-            export_cmd = (
-                f"xcodebuild -exportArchive "
-                f"-archivePath {archive_path} "
-                f"-exportPath {ipa_output_dir} "
-                f"-exportOptionsPlist {export_options_path}"
-            )
-            logger.info(f"Export command: {export_cmd}")
-            build_result = os.system(export_cmd)
-            
-            if build_result != 0:
-                raise Exception("iOS build failed")
             
             # Find the IPA file
             ipa_dir = f"./{uuid}/build/ios/ipa"
