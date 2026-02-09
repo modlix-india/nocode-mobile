@@ -722,8 +722,11 @@ def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name, 
     logger.info(f"Updated Xcode project with manual signing: bundle_id={bundle_id}, team_id={team_id}, profile={profile_name}")
 
 
-def create_export_options_plist(output_path, team_id, bundle_id, profile_name, method='app-store'):
-    """Create ExportOptions.plist for iOS archive export."""
+def create_export_options_plist(output_path, team_id, bundle_id, profile_name, method='app-store-connect', signing_certificate_hash=None):
+    """Create ExportOptions.plist for iOS archive export.
+    When signing_certificate_hash (SHA-1) is provided, it pins the export to that identity,
+    avoiding 'profile doesn't include signing certificate' when multiple certs share the same name.
+    """
     export_options = {
         'method': method,
         'teamID': team_id,
@@ -734,6 +737,9 @@ def create_export_options_plist(output_path, team_id, bundle_id, profile_name, m
         'uploadSymbols': True,
         'compileBitcode': False
     }
+    if signing_certificate_hash:
+        export_options['signingCertificate'] = signing_certificate_hash
+        logger.info(f"ExportOptions: pinned signing certificate to hash {signing_certificate_hash[:20]}...")
     
     with open(output_path, 'wb') as f:
         plistlib.dump(export_options, f)
@@ -1379,9 +1385,15 @@ try :
             logger.info(f"Verification - Bundle ID in pbxproj: {ios_creds['bundle_id'] in pbx_content}")
             logger.info(f"Verification - Team ID in pbxproj: {ios_creds['team_id'] in pbx_content}")
             
-            # Create ExportOptions.plist
+            # Create ExportOptions.plist (include cert hash so export uses same identity as archive)
             export_options_path = f"./{uuid}/ExportOptions.plist"
-            create_export_options_plist(export_options_path, ios_creds['team_id'], ios_creds['bundle_id'], profile_name)
+            create_export_options_plist(
+                export_options_path,
+                ios_creds['team_id'],
+                ios_creds['bundle_id'],
+                profile_name,
+                signing_certificate_hash=cert_hash
+            )
             
             # Log ExportOptions.plist content for debugging
             with open(export_options_path, 'rb') as f:
@@ -1826,20 +1838,50 @@ exec xcodebuild "$@"
                 # Restoration happens after export (see below).
                 pass
             
-            # Export IPA using xcodebuild (must run with same keychain as archive so
-            # the signing identity is found and matches the provisioning profile)
+            # Export IPA using xcodebuild (must run with same keychain as archive;
+            # ExportOptions.plist includes signingCertificate hash to pin identity)
             try:
                 ipa_output_dir = f"./{uuid}/build/ios/ipa"
                 os.makedirs(ipa_output_dir, exist_ok=True)
                 logger.info("Step 3: Exporting IPA with xcodebuild")
-                export_cmd = (
-                    f"xcodebuild -exportArchive "
-                    f"-archivePath {archive_path} "
-                    f"-exportPath {ipa_output_dir} "
-                    f"-exportOptionsPlist {export_options_path}"
+                # Log profile vs signing cert so if export fails we can see mismatch in logs
+                logger.info("=== Pre-export: Provisioning profile vs signing certificate ===")
+                logger.info(f"Provisioning profile: {installed_profile_path}")
+                try:
+                    profile_certs = extract_profile_certificates(installed_profile_path)
+                    logger.info(f"Certificates in provisioning profile ({len(profile_certs)}):")
+                    for fp in profile_certs:
+                        logger.info(f"  - {fp}")
+                    logger.info(f"Signing certificate we are using (cert_hash): {cert_hash}")
+                    if cert_hash and cert_hash in profile_certs:
+                        logger.info("✓ Signing certificate IS in the profile (export should succeed)")
+                    else:
+                        logger.warning(
+                            "✗ Signing certificate is NOT in the profile (export may fail with "
+                            "'profile doesn't include signing certificate'). "
+                            "Regenerate the profile to include this cert, or use the cert that matches the profile."
+                        )
+                except Exception as log_exc:
+                    logger.warning(f"Could not log profile/cert check: {log_exc}")
+                logger.info("=== End pre-export check ===")
+                # Unlock keychain immediately before export so IDEDistribution can access the cert
+                export_unlock = subprocess.run(
+                    ['security', 'unlock-keychain', '-u', '-p', keychain_password, keychain_path],
+                    capture_output=True, text=True
                 )
-                logger.info(f"Export command: {export_cmd}")
-                build_result = os.system(export_cmd)
+                if export_unlock.returncode == 0:
+                    logger.info("✓ Keychain unlocked immediately before export")
+                else:
+                    logger.warning(f"Keychain unlock before export: {export_unlock.stderr}")
+                export_cmd = [
+                    'xcodebuild', '-exportArchive',
+                    '-archivePath', os.path.abspath(archive_path),
+                    '-exportPath', os.path.abspath(ipa_output_dir),
+                    '-exportOptionsPlist', os.path.abspath(export_options_path)
+                ]
+                logger.info(f"Export command: {' '.join(export_cmd)}")
+                export_result = subprocess.run(export_cmd, capture_output=False, text=True)
+                build_result = export_result.returncode
                 
                 if build_result != 0:
                     raise Exception("iOS build failed")
