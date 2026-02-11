@@ -1,6 +1,7 @@
 import argparse
 import base64
 import configparser
+import datetime
 import uuid as uuid_module
 import requests
 import shutil
@@ -1120,6 +1121,7 @@ try :
 
     android_app_url = None
     ios_app_url = None
+    build_timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
     
     # ===================== Android Build =====================
     if 'android' in details and details['android']:
@@ -1133,8 +1135,8 @@ try :
             requests.post(f"{url_prefix}/api/ui/applications/mobileApps/status/{mobileApp['id']}", headers=headers, json={"status": "FAILED", "errorMessage": "Android build failed. Please, check with Engineering team."})
             exit(1)
 
-        # Rename the file to <appCode>_<clientCode>_<version>.aab
-        newFileName = f"{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.aab"
+        # Rename the file to <appCode>_<clientCode>_<timestamp>_<version>.aab
+        newFileName = f"{mobileApp['appCode']}_{client_code_lowercase}_{build_timestamp}_{details['version']}.aab"
         newFilePath = f"./{uuid}/build/app/outputs/bundle/release/{newFileName}"
         os.rename(filePath, newFilePath)
 
@@ -1148,7 +1150,7 @@ try :
             raise Exception(f"Failed to upload Android file to the server. URL: {fileUploadURL}. Status code: {response.status_code}. Response: {response.json()}")
 
         logger.info(f"Android file uploaded to the server. URL: {response.json()['url']}")
-        android_app_url = f"api/files/secured/file/{mobileApp['clientCode']}/_withInClient/{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.aab"
+        android_app_url = f"api/files/secured/file/{mobileApp['clientCode']}/_withInClient/{mobileApp['appCode']}_{client_code_lowercase}_{build_timestamp}_{details['version']}.aab"
 
     # ===================== iOS Build =====================
     if 'ios' in details and details['ios']:
@@ -1918,7 +1920,7 @@ exec xcodebuild "$@"
             ipa_path = os.path.join(ipa_dir, ipa_files[0])
             
             # Rename the IPA file
-            new_ipa_name = f"{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.ipa"
+            new_ipa_name = f"{mobileApp['appCode']}_{client_code_lowercase}_{build_timestamp}_{details['version']}.ipa"
             new_ipa_path = os.path.join(ipa_dir, new_ipa_name)
             os.rename(ipa_path, new_ipa_path)
             
@@ -1932,7 +1934,7 @@ exec xcodebuild "$@"
                 raise Exception(f"Failed to upload iOS file to the server. Status code: {response.status_code}. Response: {response.json()}")
             
             logger.info(f"iOS file uploaded to the server. URL: {response.json()['url']}")
-            ios_app_url = f"api/files/secured/file/{mobileApp['clientCode']}/_withInClient/{mobileApp['appCode']}_{client_code_lowercase}_{details['version']}.ipa"
+            ios_app_url = f"api/files/secured/file/{mobileApp['clientCode']}/_withInClient/{mobileApp['appCode']}_{client_code_lowercase}_{build_timestamp}_{details['version']}.ipa"
             
         except Exception as ios_error:
             logger.error(f"iOS build error: {ios_error}")
