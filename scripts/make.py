@@ -917,6 +917,9 @@ try :
         f.write(f"  static const String homePageTitle = '{details['name']}';\n")
         f.write(f"  static const String appVersion = '{details['version']}.0.0';\n")
         f.write(f"  static const String startURL = '{details['startURL']}';\n")
+        f.write(f"  static const String appCode = '{mobileApp['appCode']}';\n")
+        f.write(f"  static const String clientCode = '{mobileApp['clientCode']}';\n")
+        f.write(f"  static const String appUserAgentTag = 'ModlixApp/{details['version']}.0.0 {mobileApp['clientCode']}/{mobileApp['appCode']}';\n")
 
         if 'splashScreen' in details:
             if 'image' in details['splashScreen']:

@@ -3,6 +3,9 @@ class AppProperties {
   static const String homePageTitle = '<appTitle>';
   static const String appVersion = '1.0.0';
   static const String startURL = 'https://apps.modlix.com';
+  static const String appCode = '<appCode>';
+  static const String clientCode = '<clientCode>';
+  static const String appUserAgentTag = 'ModlixApp/$appVersion $clientCode/$appCode';
   static const bool generatedSplashScreen = false;
   static const String splashScreenImage = 'assets/splash_screen.png';
   static const String splashScreenBackgroundImage =

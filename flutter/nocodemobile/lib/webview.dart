@@ -5,6 +5,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_file_dialog/flutter_file_dialog.dart';
+import 'app_properties.dart';
 
 class MyWebView extends StatefulWidget {
   final String url;
@@ -18,6 +19,15 @@ class _MyWebViewState extends State<MyWebView> {
   InAppWebViewController? _controller;
   final _dio = Dio();
   double? _progress; // 0..1 or null (hidden)
+  String? _ua;
+
+  @override
+  void initState() {
+    super.initState();
+    InAppWebViewController.getDefaultUserAgent().then(
+      (def) => setState(() => _ua = '$def ${AppProperties.appUserAgentTag}'),
+    );
+  }
 
   void _toast(String msg) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -141,6 +151,9 @@ class _MyWebViewState extends State<MyWebView> {
 
   @override
   Widget build(BuildContext context) {
+    if (_ua == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
     return Scaffold(
       // Prevent screen from resizing when keyboard appears
       resizeToAvoidBottomInset: false,
@@ -149,6 +162,8 @@ class _MyWebViewState extends State<MyWebView> {
           InAppWebView(
             initialUrlRequest: URLRequest(url: WebUri(widget.url)),
             initialSettings: InAppWebViewSettings(
+              userAgent: _ua,
+              applicationNameForUserAgent: AppProperties.appUserAgentTag,
               javaScriptEnabled: true,
               allowsInlineMediaPlayback: true,
               useOnDownloadStart: true,
