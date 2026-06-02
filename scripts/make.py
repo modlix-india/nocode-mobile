@@ -911,6 +911,12 @@ try :
     # Replace the app title in the app_properties.dart file
     app_properties_file = f'./{uuid}/lib/app_properties.dart'
 
+    # Per-app custom URL scheme for the social-login (Google/Meta) callback from
+    # the system browser. Must be unique per app and match the Android manifest
+    # placeholder injected into build.gradle.kts below. URL schemes are
+    # case-insensitive; lowercase keeps Android/iOS matching predictable.
+    sso_callback_scheme = f"modlix.{mobileApp['clientCode'].lower()}.{mobileApp['appCode'].lower()}"
+
     with open(app_properties_file, 'w') as f:
         f.write(f"class AppProperties {{\n")
         f.write(f"  static const String appTitle = '{details['name']}';\n")
@@ -920,6 +926,7 @@ try :
         f.write(f"  static const String appCode = '{mobileApp['appCode']}';\n")
         f.write(f"  static const String clientCode = '{mobileApp['clientCode']}';\n")
         f.write(f"  static const String appUserAgentTag = 'ModlixApp/{details['version']}.0.0 {mobileApp['clientCode']}/{mobileApp['appCode']}';\n")
+        f.write(f"  static const String ssoCallbackScheme = '{sso_callback_scheme}';\n")
 
         if 'splashScreen' in details:
             if 'image' in details['splashScreen']:
@@ -1076,6 +1083,8 @@ try :
 
     client_code_lowercase = mobileApp['clientCode'].lower()
     content = content.replace("applicationId = \"com.modlix.nocodemobile\"", f"applicationId = \"com.modlix.nocodemobile.{client_code_lowercase}.{lowercasename}\"")
+    # Register the per-app social-login callback scheme used by flutter_web_auth_2.
+    content = content.replace('manifestPlaceholders["ssoCallbackScheme"] = "modlix"', f'manifestPlaceholders["ssoCallbackScheme"] = "{sso_callback_scheme}"')
 
     with open(blundle_gradle_kts, 'w') as f:
         f.write(content)

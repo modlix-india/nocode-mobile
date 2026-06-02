@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_file_dialog/flutter_file_dialog.dart';
@@ -144,6 +145,69 @@ class _MyWebViewState extends State<MyWebView> {
     if (savedPath != null) _toast('Saved to: $savedPath');
   }
 
+  /// True for the authzump social-register entry point. The web app navigates
+  /// here (window.location) when the user taps "Sign in with Google/Meta"; this
+  /// is the one hop that must happen in a real browser, not the WebView.
+  bool _isSocialLoginEvoke(WebUri? url) {
+    if (url == null) return false;
+    return url.path.endsWith('/api/security/clients/socialRegister/evoke');
+  }
+
+  /// Runs the social-login OAuth flow in the system browser
+  /// (ASWebAuthenticationSession on iOS / Chrome Custom Tabs on Android), then
+  /// replays the resulting social profile back into the WebView so the existing
+  /// web SocialLogin logic completes the session in-app.
+  ///
+  /// Flow: the backend's /socialRegister/callback 302-redirects to whatever
+  /// `redirectUrl` we pass, carrying the social profile (sessionId, emailId, …)
+  /// as query params. We pass our own custom scheme so the browser hands control
+  /// back to the app, then re-apply those params onto the *original* in-app page
+  /// the user came from and load it in the WebView.
+  Future<void> _handleSocialLogin(WebUri evokeUrl) async {
+    // Where the web flow wanted to land back (the in-app page that initiated
+    // login). Fall back to the current page, then to the start URL.
+    final originalRedirect =
+        evokeUrl.queryParameters['redirectUrl'] ??
+        (await _controller?.getUrl())?.toString() ??
+        AppProperties.startURL;
+
+    // Point the backend's final redirect at our custom scheme so the system
+    // browser returns control to the app instead of staying in the browser.
+    final scheme = AppProperties.ssoCallbackScheme;
+    final browserUrl = evokeUrl.replace(
+      queryParameters: {
+        ...evokeUrl.queryParameters,
+        'redirectUrl': '$scheme://sso-callback',
+      },
+    );
+
+    String callbackRaw;
+    try {
+      callbackRaw = await FlutterWebAuth2.authenticate(
+        url: browserUrl.toString(),
+        callbackUrlScheme: scheme,
+      );
+    } catch (e) {
+      // User cancelled / closed the browser, or no compatible browser.
+      _toast('Sign-in cancelled');
+      return;
+    }
+
+    // Merge the social profile params the backend appended onto the original
+    // in-app page, then load it so the web SocialLogin logic finishes login.
+    final callback = Uri.parse(callbackRaw);
+    final target = Uri.parse(originalRedirect);
+    final merged = <String, String>{...target.queryParameters};
+    callback.queryParameters.forEach((k, v) {
+      if (k != 'redirectUrl') merged[k] = v;
+    });
+    final finalUrl = target.replace(queryParameters: merged);
+
+    await _controller?.loadUrl(
+      urlRequest: URLRequest(url: WebUri(finalUrl.toString())),
+    );
+  }
+
   bool _looksLikeFileUrl(String u) => RegExp(
     r'\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|png|jpe?g|gif|mp4|apk)$',
     caseSensitive: false,
@@ -167,6 +231,9 @@ class _MyWebViewState extends State<MyWebView> {
               javaScriptEnabled: true,
               allowsInlineMediaPlayback: true,
               useOnDownloadStart: true,
+              // Required on Android for shouldOverrideUrlLoading to fire (used for
+              // file downloads and for intercepting the social-login redirect).
+              useShouldOverrideUrlLoading: true,
               // Prevent auto-zoom on iOS when input fields are focused
               minimumZoomScale: Platform.isIOS ? 1.0 : null,
               maximumZoomScale: Platform.isIOS ? 1.0 : null,
@@ -284,6 +351,15 @@ class _MyWebViewState extends State<MyWebView> {
             // Intercept common file extensions
             shouldOverrideUrlLoading: (controller, action) async {
               final u = action.request.url?.toString() ?? '';
+
+              // Social login (Google/Meta) cannot run inside an embedded WebView —
+              // Google blocks it with "403 disallowed_useragent". Hand the OAuth
+              // flow to the system browser and replay the result into the WebView.
+              if (_isSocialLoginEvoke(action.request.url)) {
+                _handleSocialLogin(action.request.url!);
+                return NavigationActionPolicy.CANCEL;
+              }
+
               if (_looksLikeFileUrl(u)) {
                 await _downloadThenSave(u);
                 return NavigationActionPolicy.CANCEL;

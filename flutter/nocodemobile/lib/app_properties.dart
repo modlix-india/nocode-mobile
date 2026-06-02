@@ -6,6 +6,10 @@ class AppProperties {
   static const String appCode = '<appCode>';
   static const String clientCode = '<clientCode>';
   static const String appUserAgentTag = 'ModlixApp/$appVersion $clientCode/$appCode';
+  // Custom URL scheme for the social-login callback from the system browser.
+  // Unique per app; make.py overwrites this with "modlix.<clientCode>.<appCode>".
+  // Must match android/app/build.gradle.kts manifestPlaceholders["ssoCallbackScheme"].
+  static const String ssoCallbackScheme = 'modlix';
   static const bool generatedSplashScreen = false;
   static const String splashScreenImage = 'assets/splash_screen.png';
   static const String splashScreenBackgroundImage =

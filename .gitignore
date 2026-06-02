@@ -7,3 +7,5 @@ scripts/run_stage.sh
 
 certs/
 provisioning-profiles/
+
+scripts/__pycache__/**

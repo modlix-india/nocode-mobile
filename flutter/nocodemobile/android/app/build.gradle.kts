@@ -47,6 +47,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // Custom URL scheme used by flutter_web_auth_2 to receive the social-login
+        // (Google/Meta) callback from the system browser. Unique per app; make.py
+        // overwrites this with "modlix.<clientCode>.<appCode>" at build time.
+        manifestPlaceholders["ssoCallbackScheme"] = "modlix"
     }
 
     buildTypes {
