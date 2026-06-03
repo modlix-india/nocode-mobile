@@ -71,3 +71,13 @@ android {
 flutter {
     source = "../.."
 }
+
+// flutter_web_auth_2 (social login) transitively pulls androidx.browser:1.9.0,
+// whose AAR metadata requires AGP 8.9.1+. This project pins AGP 8.7.3, so pin
+// androidx.browser to 1.8.0 (compatible with 8.7.3 and sufficient for Custom Tabs)
+// to avoid a toolchain-wide AGP bump. Remove if/when AGP is upgraded to >= 8.9.1.
+configurations.all {
+    resolutionStrategy {
+        force("androidx.browser:browser:1.8.0")
+    }
+}
