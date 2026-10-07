@@ -221,46 +221,50 @@ class _MyWebViewState extends State<MyWebView> {
     return Scaffold(
       // Prevent screen from resizing when keyboard appears
       resizeToAvoidBottomInset: false,
-      body: Stack(
-        children: [
-          InAppWebView(
-            initialUrlRequest: URLRequest(url: WebUri(widget.url)),
-            initialSettings: InAppWebViewSettings(
-              userAgent: _ua,
-              applicationNameForUserAgent: AppProperties.appUserAgentTag,
-              javaScriptEnabled: true,
-              allowsInlineMediaPlayback: true,
-              useOnDownloadStart: true,
-              // Required on Android for shouldOverrideUrlLoading to fire (used for
-              // file downloads and for intercepting the social-login redirect).
-              useShouldOverrideUrlLoading: true,
-              // Prevent auto-zoom on iOS when input fields are focused
-              minimumZoomScale: Platform.isIOS ? 1.0 : null,
-              maximumZoomScale: Platform.isIOS ? 1.0 : null,
-              // Prevent viewport from resizing when keyboard appears on iOS
-              disableVerticalScroll: false,
-              disableHorizontalScroll: false,
-            ),
-            onWebViewCreated: (c) async {
-              _controller = c;
+      // Keep the page out of the status bar, notch and gesture bar. Apps built for
+      // Android 15 (targetSdk 35) are drawn edge to edge, so without this the web
+      // page's top bar sat under the phone's clock and battery icons (QA-0165).
+      body: SafeArea(
+        child: Stack(
+          children: [
+            InAppWebView(
+              initialUrlRequest: URLRequest(url: WebUri(widget.url)),
+              initialSettings: InAppWebViewSettings(
+                userAgent: _ua,
+                applicationNameForUserAgent: AppProperties.appUserAgentTag,
+                javaScriptEnabled: true,
+                allowsInlineMediaPlayback: true,
+                useOnDownloadStart: true,
+                // Required on Android for shouldOverrideUrlLoading to fire (used for
+                // file downloads and for intercepting the social-login redirect).
+                useShouldOverrideUrlLoading: true,
+                // Prevent auto-zoom on iOS when input fields are focused
+                minimumZoomScale: Platform.isIOS ? 1.0 : null,
+                maximumZoomScale: Platform.isIOS ? 1.0 : null,
+                // Prevent viewport from resizing when keyboard appears on iOS
+                disableVerticalScroll: false,
+                disableHorizontalScroll: false,
+              ),
+              onWebViewCreated: (c) async {
+                _controller = c;
 
-              // For blob: URLs
-              c.addJavaScriptHandler(
-                handlerName: 'saveBase64File',
-                callback: (args) async {
-                  final b64 = args[0] as String;
-                  final name = (args.length > 1
-                      ? args[1] as String
-                      : 'file.bin');
-                  await _saveBase64(b64, name);
-                },
-              );
-            },
-            onLoadStop: (c, url) async {
-              // Inject viewport meta tag to prevent zoom and keyboard shifting on iOS
-              if (Platform.isIOS) {
-                await c.evaluateJavascript(
-                  source: '''
+                // For blob: URLs
+                c.addJavaScriptHandler(
+                  handlerName: 'saveBase64File',
+                  callback: (args) async {
+                    final b64 = args[0] as String;
+                    final name = (args.length > 1
+                        ? args[1] as String
+                        : 'file.bin');
+                    await _saveBase64(b64, name);
+                  },
+                );
+              },
+              onLoadStop: (c, url) async {
+                // Inject viewport meta tag to prevent zoom and keyboard shifting on iOS
+                if (Platform.isIOS) {
+                  await c.evaluateJavascript(
+                    source: '''
                   (function() {
                     // Remove existing viewport meta tag if any
                     var existingViewport = document.querySelector('meta[name="viewport"]');
@@ -334,50 +338,51 @@ class _MyWebViewState extends State<MyWebView> {
                     });
                   })();
                 ''',
+                  );
+                }
+
+                await c.evaluateJavascript(source: _blobHook);
+              },
+
+              // Direct downloads (Content-Disposition etc.)
+              onDownloadStartRequest: (controller, request) async {
+                await _downloadThenSave(
+                  request.url.toString(),
+                  suggestedName: request.suggestedFilename,
                 );
-              }
+              },
 
-              await c.evaluateJavascript(source: _blobHook);
-            },
+              // Intercept common file extensions
+              shouldOverrideUrlLoading: (controller, action) async {
+                final u = action.request.url?.toString() ?? '';
 
-            // Direct downloads (Content-Disposition etc.)
-            onDownloadStartRequest: (controller, request) async {
-              await _downloadThenSave(
-                request.url.toString(),
-                suggestedName: request.suggestedFilename,
-              );
-            },
+                // Social login (Google/Meta) cannot run inside an embedded WebView —
+                // Google blocks it with "403 disallowed_useragent". Hand the OAuth
+                // flow to the system browser and replay the result into the WebView.
+                if (_isSocialLoginEvoke(action.request.url)) {
+                  _handleSocialLogin(action.request.url!);
+                  return NavigationActionPolicy.CANCEL;
+                }
 
-            // Intercept common file extensions
-            shouldOverrideUrlLoading: (controller, action) async {
-              final u = action.request.url?.toString() ?? '';
-
-              // Social login (Google/Meta) cannot run inside an embedded WebView —
-              // Google blocks it with "403 disallowed_useragent". Hand the OAuth
-              // flow to the system browser and replay the result into the WebView.
-              if (_isSocialLoginEvoke(action.request.url)) {
-                _handleSocialLogin(action.request.url!);
-                return NavigationActionPolicy.CANCEL;
-              }
-
-              if (_looksLikeFileUrl(u)) {
-                await _downloadThenSave(u);
-                return NavigationActionPolicy.CANCEL;
-              }
-              return NavigationActionPolicy.ALLOW;
-            },
-          ),
-
-          if (_progress != null)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: LinearProgressIndicator(
-                value: _progress == 0 ? null : _progress,
-              ),
+                if (_looksLikeFileUrl(u)) {
+                  await _downloadThenSave(u);
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              },
             ),
-        ],
+
+            if (_progress != null)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: LinearProgressIndicator(
+                  value: _progress == 0 ? null : _progress,
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
