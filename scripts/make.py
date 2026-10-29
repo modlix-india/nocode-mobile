@@ -1133,6 +1133,7 @@ try :
 
     android_app_url = None
     ios_app_url = None
+    ios_error_message = None
     build_timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
     
     # ===================== Android Build =====================
@@ -1950,9 +1951,10 @@ exec xcodebuild "$@"
             
         except Exception as ios_error:
             logger.error(f"iOS build error: {ios_error}")
-            # If Android was successful but iOS failed, we'll still report partial success
+            # If Android was successful, keep its file but still report the iOS failure (see Update Status)
             if android_app_url:
-                logger.warning("iOS build failed but Android build succeeded. Continuing with partial success.")
+                logger.warning("iOS build failed but Android build succeeded. Reporting FAILED with the Android file attached.")
+                ios_error_message = str(ios_error)
             else:
                 raise ios_error
         finally:
@@ -2001,9 +2003,13 @@ exec xcodebuild "$@"
             status_payload["androidAppURL"] = android_app_url
         if ios_app_url:
             status_payload["iosAppURL"] = ios_app_url
-        
+        # A requested iOS build that failed must not pass as SUCCESS; the server keeps androidAppURL on FAILED
+        if ios_error_message:
+            status_payload["status"] = "FAILED"
+            status_payload["errorMessage"] = f"iOS build failed: {ios_error_message}. The Android app was built."
+
         requests.post(f"{url_prefix}/api/ui/applications/mobileApps/status/{mobileApp['id']}", headers=headers, json=status_payload)
-        logger.info(f"Updated the status to SUCCESS")
+        logger.info(f"Updated the status to {status_payload['status']}")
     else:
         raise Exception("No builds were successful")
 
