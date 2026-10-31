@@ -44,5 +44,11 @@
 	<string>Need access to camera</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Need access to microphone</string>
+	<!-- Push: the Apple team whose APNs key reaches this app, and the APNs host its tokens
+	     belong to. make.py sets production with the aps-environment entitlement. -->
+	<key>ModlixApnsTeamId</key>
+	<string>$(DEVELOPMENT_TEAM)</string>
+	<key>ModlixApnsEnv</key>
+	<string>sandbox</string>
 </dict>
 </plist>

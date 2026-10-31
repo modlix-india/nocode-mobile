@@ -10,6 +10,9 @@ class AppProperties {
   // Unique per app; make.py overwrites this with "modlix.<clientCode>.<appCode>".
   // Must match android/app/build.gradle.kts manifestPlaceholders["ssoCallbackScheme"].
   static const String ssoCallbackScheme = 'modlix';
+  // Push notifications; make.py turns it on for an app with push (and writes the Firebase
+  // resources for Android and the APNs entitlement for iOS).
+  static const bool pushEnabled = false;
   static const bool generatedSplashScreen = false;
   static const String splashScreenImage = 'assets/splash_screen.png';
   static const String splashScreenBackgroundImage =

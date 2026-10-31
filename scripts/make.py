@@ -600,6 +600,56 @@ def install_provisioning_profile(profile_path):
     return profile_uuid, profile_name
 
 
+def enable_push(project_dir, mobileApp):
+    """Turns push notifications on in the copied template.
+
+    Android: res/values/firebase.xml with the app's Firebase values, which Firebase reads on its
+    own at start-up (the resources the google-services plugin would generate). Without them
+    the app builds and push answers "unsupported" on Android.
+
+    iOS: the aps-environment entitlement (production: App Store and TestFlight builds) and the
+    matching ModlixApnsEnv. The provisioning profile must carry the Push Notifications
+    capability: the backend turns it on for PLATFORM_ACCOUNT bundles; a TENANT_ACCOUNT profile
+    must have it already, or signing fails.
+    """
+    from xml.sax.saxutils import escape
+
+    firebase = mobileApp.get('firebaseAndroid') or {}
+    keys = {
+        'google_app_id': firebase.get('appId'),
+        'google_api_key': firebase.get('apiKey'),
+        'project_id': firebase.get('projectId'),
+        'gcm_defaultSenderId': firebase.get('messagingSenderId'),
+    }
+    if all(keys.values()):
+        values = ''.join(
+            f'    <string name="{k}" translatable="false">{escape(str(v))}</string>\n' for k, v in keys.items()
+        )
+        with open(os.path.join(project_dir, 'android', 'app', 'src', 'main', 'res', 'values', 'firebase.xml'), 'w') as f:
+            f.write(f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n{values}</resources>\n')
+        logger.info(f"Push: Firebase project {keys['project_id']} written for Android")
+    else:
+        logger.warning("Push: no complete firebaseAndroid on the mobile app, Android builds without push")
+
+    entitlements = os.path.join(project_dir, 'ios', 'Runner', 'Runner.entitlements')
+    with open(entitlements, 'rb') as f:
+        ent = plistlib.load(f)
+    ent['aps-environment'] = 'production'
+    with open(entitlements, 'wb') as f:
+        plistlib.dump(ent, f)
+
+    info_plist = os.path.join(project_dir, 'ios', 'Runner', 'Info.plist')
+    with open(info_plist, 'r') as f:
+        content = f.read()
+    content = content.replace(
+        '<key>ModlixApnsEnv</key>\n\t<string>sandbox</string>',
+        '<key>ModlixApnsEnv</key>\n\t<string>production</string>',
+    )
+    with open(info_plist, 'w') as f:
+        f.write(content)
+    logger.info("Push: aps-environment=production for iOS")
+
+
 def update_xcode_project_signing(project_dir, bundle_id, team_id, profile_name, cert_hash=None):
     """Update Xcode project with manual signing configuration.
     
@@ -917,6 +967,10 @@ try :
     # case-insensitive; lowercase keeps Android/iOS matching predictable.
     sso_callback_scheme = f"modlix.{mobileApp['clientCode'].lower()}.{mobileApp['appCode'].lower()}"
 
+    # Push notifications: on when the app asked for them. Android also needs the app's
+    # Firebase values (firebaseAndroid), iOS the aps-environment entitlement written below.
+    push_enabled = bool(details.get('pushNotifications'))
+
     with open(app_properties_file, 'w') as f:
         f.write(f"class AppProperties {{\n")
         f.write(f"  static const String appTitle = '{details['name']}';\n")
@@ -927,6 +981,7 @@ try :
         f.write(f"  static const String clientCode = '{mobileApp['clientCode']}';\n")
         f.write(f"  static const String appUserAgentTag = 'ModlixApp/{details['version']}.0.0 {mobileApp['clientCode']}/{mobileApp['appCode']}';\n")
         f.write(f"  static const String ssoCallbackScheme = '{sso_callback_scheme}';\n")
+        f.write(f"  static const bool pushEnabled = {'true' if push_enabled else 'false'};\n")
 
         if 'splashScreen' in details:
             if 'image' in details['splashScreen']:
@@ -1108,6 +1163,9 @@ try :
 
     with open(ios_info_plist, 'w') as f:
         f.write(content)
+
+    if push_enabled:
+        enable_push(f"./{uuid}", mobileApp)
 
 
     if 'androidKeystore' in mobileApp:

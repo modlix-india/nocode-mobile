@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'app_properties.dart';
+import 'push.dart';
 
 class MyWebView extends StatefulWidget {
   final String url;
@@ -28,6 +29,14 @@ class _MyWebViewState extends State<MyWebView> {
     InAppWebViewController.getDefaultUserAgent().then(
       (def) => setState(() => _ua = '$def ${AppProperties.appUserAgentTag}'),
     );
+    Push.onOpen(_openFromNotification);
+  }
+
+  /// Opens a tapped notification's page in the WebView (only pages of this app).
+  Future<void> _openFromNotification(String url) async {
+    final target = Push.resolve(url);
+    if (target == null) return;
+    await _controller?.loadUrl(urlRequest: URLRequest(url: WebUri(target.toString())));
   }
 
   void _toast(String msg) =>
@@ -247,6 +256,21 @@ class _MyWebViewState extends State<MyWebView> {
               ),
               onWebViewCreated: (c) async {
                 _controller = c;
+
+                // Push: the web app asks for the device and registers it itself.
+                c.addJavaScriptHandler(
+                  handlerName: 'pushRegister',
+                  callback: (args) async {
+                    final a = args.isNotEmpty && args[0] is Map ? args[0] as Map : const {};
+                    return Push.register(a['prompt'] == true);
+                  },
+                );
+                c.addJavaScriptHandler(handlerName: 'pushStatus', callback: (_) => Push.status());
+                c.addJavaScriptHandler(handlerName: 'pushToken', callback: (_) => Push.token());
+
+                // The app was started by tapping a notification.
+                final opened = await Push.initialUrl();
+                if (opened != null) await _openFromNotification(opened);
 
                 // For blob: URLs
                 c.addJavaScriptHandler(

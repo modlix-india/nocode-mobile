@@ -72,6 +72,14 @@ flutter {
     source = "../.."
 }
 
+// Push: FCM through the Firebase messaging library (MainActivity.kt). It starts from the
+// google_app_id resources make.py writes for an app with push on; without them it stays idle.
+// BoM 33 keeps minSdk 21 and works with AGP 8.7.3.
+dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
+}
+
 // flutter_web_auth_2 (social login) transitively pulls androidx.browser:1.9.0,
 // whose AAR metadata requires AGP 8.9.1+. This project pins AGP 8.7.3, so pin
 // androidx.browser to 1.8.0 (compatible with 8.7.3 and sufficient for Custom Tabs)
