@@ -822,7 +822,8 @@ def cleanup_keychain(keychain_path):
 def get_ios_credentials(mobileApp):
     """Get iOS credentials from API response or environment variables."""
     details = mobileApp.get('details', {})
-    ios_publish_mode = details.get('iosPublishMode', 'TENANT_ACCOUNT')
+    # No choice means Modlix's accounts; the backend now saves it that way too.
+    ios_publish_mode = details.get('publishMode') or details.get('iosPublishMode') or 'PLATFORM_ACCOUNT'
     
     if ios_publish_mode == 'PLATFORM_ACCOUNT':
         # Use environment variables for Modlix's account
